@@ -15,8 +15,11 @@ import math
 import os
 import unittest
 
+from chonoi.ids import IdAllocator
 from chonoi.inputs import InputState
+from chonoi.rng import Streams
 from chonoi.runner import Session
+from chonoi.sim.gather import GatherSim
 from helpers import ROOT, Workdir, events, frames, read_jsonl, run_headless, snapshots, write_json
 
 TICK = 60
@@ -390,9 +393,12 @@ class FishV11Case(unittest.TestCase):
 
     @staticmethod
     def steps(s, n, inp=IDLE):
-        """Chạy n bước (bước đầu dùng `inp`, các bước sau không bấm gì); trả [(tick, name, data)]."""
+        """Chạy tối đa n bước như runner (dừng khi buổi kết thúc); bước đầu dùng `inp`, các bước sau không bấm gì.
+        Trả [(tick, name, data)]."""
         out = []
         for i in range(n):
+            if s.done:
+                break
             out += [(r["tick"], r["name"], r["data"]) for r in s.step(inp if i == 0 else IDLE)]
         return out
 
@@ -556,6 +562,153 @@ class FishV11SwimSpawn(FishV11Case):
             return self.steps(s, 1500), self.fishmap(s)
         self.assertEqual(run(42), run(42))
         self.assertNotEqual(run(42), run(7))
+
+
+MON = GV["monsters"]
+SAU = MON["species"]["ca_sau"]
+THR = SAU["depths"][0]  # ngưỡng độ sâu của loài: phát hiện và chạm chỉ khi người chơi ở d >= THR
+INVULN = MON["invuln_ticks"]
+RECOIL_STEP = SAU["recoil_dist"] / SAU["recoil_ticks"]
+NEAR = SAU["chase_speed"] / TICK * 0.8  # gần hơn một bước chase: quái tới đúng vị trí người chơi, khoảng cách 0
+
+
+def croc(mid, pos, waypoints=None, **extra):
+    return {"id": mid, "kind": "ca_sau", "pos": pos, "waypoints": waypoints or [pos, [pos[0] + 4, pos[1]]], **extra}
+
+
+class MonsterV11(FishV11Case):
+    """AC-P2-02: Cá Sấu theo Ngày, patrol/chase, một hit mỗi bước, rơi LIFO, bất tử, recoil, ngất."""
+
+    def play(self, monsters, player, ticks=1, **extra):
+        s = self.session({"random_fish": False, "monsters": monsters, "player": player, **extra})
+        return s, self.steps(s, ticks)
+
+    @staticmethod
+    def mon(s, mid):
+        return next(m for m in s.snapshot()["monsters"] if m["id"] == mid)
+
+    def test_default_layout_by_day_m1_from_day_1_m2_from_day_3(self):
+        def ids_on(day):
+            return [m["id"] for m in GatherSim(V11, {}, Streams(42), IdAllocator(), day=day).snapshot()["monsters"]]
+        for day in range(1, 6):
+            self.assertEqual(ids_on(day), [m["id"] for m in MON["spawns"] if m["from_day"] <= day], day)
+        self.assertEqual((ids_on(2), ids_on(3)), (["M1"], ["M1", "M2"]))
+        m1 = self.session().snapshot()["monsters"]  # gather độc lập = bố trí Ngày 1
+        self.assertEqual([(m["id"], m["pos"], m["state"], m["target_idx"]) for m in m1],
+                         [("M1", [float(c) for c in MON["spawns"][0]["pos"]], "patrol", 1)])
+        self.assertEqual(self.play([], {"pos": [20, 0]})[0].snapshot()["monsters"], [], "monsters: [] thay bố trí")
+
+    def test_patrol_speed_and_switch_waypoint_after_arriving(self):
+        step, wp = SAU["patrol_speed"] / TICK, [[60.0, 24.0], [64.0, 24.0]]
+        n = round(math.dist(*wp) / step)  # số bước tới waypoint kia
+        s = self.session({"random_fish": False, "monsters": [croc("M1", wp[0], wp)]})
+        xs, idx = [], []
+        for _ in range(2 * n + 1):
+            s.step(IDLE)
+            m = self.mon(s, "M1")
+            xs.append(m["pos"][0])
+            idx.append(m["target_idx"])
+        for k in (1, n // 2, n - 1):
+            self.assertAlmostEqual(xs[k - 1], wp[0][0] + k * step, places=9)
+        self.assertEqual((xs[n - 1], idx[n - 2], idx[n - 1]), (wp[1][0], 1, 0), "tới đúng bước thứ n rồi đổi đích")
+        self.assertAlmostEqual(xs[n], wp[1][0] - step, places=9)
+        self.assertEqual((xs[2 * n - 1], idx[2 * n - 1]), (wp[0][0], 1))
+
+    def test_chase_detect_and_exit_rules(self):
+        cases = {  # nhãn: (quái, vị trí người chơi, trạng thái sau một bước)
+            "phát hiện trong detect_radius": (croc("M1", [60, 24]), [60 - SAU["detect_radius"] + 1, 24], "chase"),
+            "phát hiện đúng mép detect_radius": (croc("M1", [60, 24]), [60 - SAU["detect_radius"], 24], "chase"),
+            "người chơi trên ngưỡng độ sâu": (croc("M1", [60, THR + 2]), [60, THR - 0.5], "patrol"),
+            "đang chase, người chơi lên trên ngưỡng": (croc("M1", [60, THR + 2], state="chase"), [60, THR - 0.5],
+                                                       "patrol"),
+            "đang chase, cách quá exit_radius": (croc("M1", [60, 24], state="chase"),
+                                                 [60 - SAU["exit_radius"] - 4, 24], "patrol"),
+            "đang chase, giữa detect và exit": (croc("M1", [60, 24], state="chase"),
+                                                [60 - (SAU["detect_radius"] + SAU["exit_radius"]) / 2, 24], "chase"),
+            "đang chase, đúng mép exit_radius": (croc("M1", [60, 24], state="chase"), [60 - SAU["exit_radius"], 24],
+                                                 "chase"),
+        }
+        for label, (m, player, want) in cases.items():
+            s, _ = self.play([m], {"pos": player})
+            self.assertEqual(self.mon(s, "M1")["state"], want, label)
+        s, _ = self.play([croc("M1", [60, 24])], {"pos": [51, 24]})  # chase đi chase_speed về phía người chơi
+        self.assertAlmostEqual(self.mon(s, "M1")["pos"][0], 60 - SAU["chase_speed"] / TICK, places=9)
+
+    def test_hit_drops_half_lifo_sets_invuln_and_recoil_away_from_player(self):
+        hold = ["ca_loc", "bong_sung", "ca_linh", "keo_neo", "ca_keo"]
+        n_lost = math.floor(len(hold) * MON["loss_ratio"])
+        s, log = self.play([croc("M1", [60, 24])], {"pos": [61, 24]}, hold=hold)
+        self.assertEqual(log, [(1, "monster_hit", {"monster_id": "M1", "hp": HP - 1, "lost": hold[::-1][:n_lost],
+                                                   "pos": [61.0, 24.0]})])
+        snap = s.snapshot()
+        self.assertEqual((snap["hold"], snap["player"]["hp"], snap["player"]["invuln_ticks"]),
+                         (hold[:len(hold) - n_lost], HP - 1, INVULN))
+        m = self.mon(s, "M1")
+        self.assertEqual((m["state"], m["state_ticks_left"], m["recoil_dir"]), ("recoil", SAU["recoil_ticks"], [-1.0, 0.0]))
+
+    def test_recoil_from_next_step_then_patrol_and_next_hit_only_after_invuln(self):
+        s, log = self.play([croc("M1", [60, 24])], {"pos": [61, 24]}, ticks=1)
+        x_hit = self.mon(s, "M1")["pos"][0]
+        for k in range(1, SAU["recoil_ticks"] + 1):  # recoil 60 bước tính từ bước sau, lùi RECOIL_STEP mỗi bước
+            log += self.steps(s, 1)
+            m = self.mon(s, "M1")
+            self.assertAlmostEqual(m["pos"][0], x_hit - k * RECOIL_STEP, places=9)
+            left = SAU["recoil_ticks"] - k
+            self.assertEqual((m["state"], m["state_ticks_left"]), ("recoil", left) if left else ("patrol", 0), k)
+        log += self.steps(s, INVULN + 30 - SAU["recoil_ticks"])
+        hits = [t for t, n, _ in log if n == "monster_hit"]
+        self.assertEqual(hits[0], 1)
+        self.assertGreaterEqual(len(hits), 2, "quái quay lại đuổi và chạm lần nữa")
+        self.assertGreaterEqual(hits[1], 1 + INVULN, "không chạm trong thời gian bất tử")
+
+    def test_one_hit_per_step_nearest_then_smaller_numeric_id(self):
+        s, log = self.play([croc("M10", [61 + NEAR, 24]), croc("M2", [61 - NEAR, 24])], {"pos": [61, 24]})
+        self.assertEqual([(n, d["monster_id"]) for _, n, d in log], [("monster_hit", "M2")], "hòa khoảng cách -> id")
+        self.assertEqual((self.mon(s, "M2")["state"], self.mon(s, "M10")["state"]), ("recoil", "chase"))
+        s, log = self.play([croc("M1", [61 - 1.2, 24]), croc("M2", [61 + 0.8, 24])], {"pos": [61, 24]})
+        self.assertEqual([(n, d["monster_id"]) for _, n, d in log], [("monster_hit", "M2")], "con gần nhất chạm")
+
+    def test_no_hit_above_species_depth_or_while_invulnerable(self):
+        _, log = self.play([croc("M1", [60, THR])], {"pos": [60, THR - 0.5]}, ticks=3)
+        self.assertEqual(log, [], "người chơi trên ngưỡng độ sâu: không chạm")
+        _, log = self.play([croc("M1", [61 - NEAR, 24])], {"pos": [61, 24], "invuln_ticks": 5}, ticks=6)
+        self.assertEqual([t for t, n, _ in log if n == "monster_hit"], [5], "bất tử 5 tick: chạm được từ tick 5")
+
+    def test_monster_hit_to_zero_hp_faints_with_remaining_hold_lifo(self):
+        hold = ["ca_loc", "bong_sung", "ca_linh"]
+        s, log = self.play([croc("M1", [61 - NEAR, 24])], {"pos": [61, 24], "hp": 1}, ticks=3, hold=hold)
+        self.assertEqual(log, [
+            (1, "monster_hit", {"monster_id": "M1", "hp": 0, "lost": ["ca_linh"], "pos": [61.0, 24.0]}),
+            (1, "faint", {"cause": "monster", "lost": ["bong_sung", "ca_loc"], "hp": 0}),
+            (1, "gather_end", {"reason": "fainted", "inventory": {"items": {}}})])
+        self.assertEqual((s.done, s.end_row()["reason"], s.snapshot()["hold"]), (True, "fainted", []))
+
+    def test_choke_goes_before_hit_and_ignores_invuln_without_dropping(self):
+        player = {"pos": [61, 24], "hp": 2, "oxygen_ticks": 0, "zero_oxy_ticks": CHOKE - 1}
+        _, log = self.play([croc("M1", [61 - NEAR, 24])], player, hold=["ca_loc"])
+        self.assertEqual([(n, d.get("hp"), d.get("cause")) for _, n, d in log],
+                         [("choke", 1, None), ("monster_hit", 0, None), ("faint", 0, "monster"),
+                          ("gather_end", None, None)])
+        s, log = self.play([], {**player, "hp": 3, "invuln_ticks": 50}, hold=["ca_loc", "bong_sung"])
+        self.assertEqual(log, [(1, "choke", {"hp": 2})])
+        self.assertEqual(s.snapshot()["hold"], ["ca_loc", "bong_sung"], "ngạt không làm rơi hàng")
+
+    def test_detection_and_contact_resume_only_the_step_after_recoil_ends(self):
+        m = croc("M1", [61, 24], state="recoil", state_ticks_left=1, recoil_dir=[1.0, 0.0])
+        s, log = self.play([m], {"pos": [61, 24]}, ticks=2)
+        self.assertEqual([t for t, n, _ in log if n == "monster_hit"], [2])
+
+    def test_monsters_clamped_to_map_and_species_depth_band(self):
+        bx = G["bounds"]["x"]
+        cases = {"lùi lên quá ngưỡng dải độ sâu": ([60, THR + RECOIL_STEP / 2], [0.0, -1.0], [60, THR]),
+                 "lùi qua mép x": ([bx[1] - RECOIL_STEP / 2, 24], [1.0, 0.0], [bx[1], 24])}
+        for label, (pos, rdir, want) in cases.items():
+            m = croc("M1", pos, state="recoil", state_ticks_left=5, recoil_dir=rdir)
+            s, _ = self.play([m], {"pos": [20, 0]})
+            self.assertEqual(self.mon(s, "M1")["pos"], [float(c) for c in want], label)
+        s = self.session({"random_fish": False, "monsters": [croc("M1", [60, 24])], "player": {"pos": [20, 0]}})
+        self.assertEqual(set(s.snapshot()["monsters"][0]),
+                         {"id", "kind", "pos", "waypoints", "target_idx", "state", "state_ticks_left", "recoil_dir"})
 
 
 if __name__ == "__main__":
