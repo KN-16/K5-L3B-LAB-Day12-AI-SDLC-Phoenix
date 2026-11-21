@@ -4,13 +4,19 @@
 Số liệu đọc từ game.contract.json. Mọi fixture tắt cá mặc định (`random_fish: false`) và khai nút/đàn tường minh để
 không phụ thuộc dữ liệu mặc định của phase sau.
 
+Phase 2 (v1.1, lớp FishV11*): test mức sim gọi thẳng `Session` của starter Python, vì manifest trên main còn v1.0;
+tuning chuẩn Ticket-02 nạp từ docs/contracts/phase-2.tuning.json cho tới khi game.contract.json lên v1.1.
+
 Chạy: PYTHONPATH=tests:. python3 -m unittest discover -s tests -p 'test_gather.py' -v
 """
 
 import json
+import math
 import os
 import unittest
 
+from chonoi.inputs import InputState
+from chonoi.runner import Session
 from helpers import ROOT, Workdir, events, frames, read_jsonl, run_headless, snapshots, write_json
 
 TICK = 60
@@ -347,6 +353,209 @@ class EndOfShift(GatherCase):
         self.assertEqual(outs[0], outs[1])
         self.assertEqual([n for _, n in self.names(rows)], ["gather", "dive", "fish_caught", "surface", "gather_end"])
         self.assertEqual(rows[-1]["reason"], "docked")
+
+
+# --- Phase 2 (Test Contract v1.1) --------------------------------------------------------------------------------
+
+def _merge(base, delta):
+    """Gộp delta tuning theo docs/contracts/phase-2.md: object gộp theo khóa, danh sách/giá trị đơn thay toàn bộ."""
+    out = dict(base)
+    for k, v in delta.items():
+        out[k] = _merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
+    return out
+
+
+def tuning_v11():
+    with open(os.path.join(ROOT, "game.contract.json"), encoding="utf-8") as f:
+        contract = json.load(f)
+    if tuple(int(x) for x in contract["contract_version"].split(".")) >= (1, 1):
+        return contract["tuning"]
+    with open(os.path.join(ROOT, "docs", "contracts", "phase-2.tuning.json"), encoding="utf-8") as f:
+        return _merge(contract["tuning"], json.load(f)["tuning"])
+
+
+V11 = tuning_v11()
+GV = V11["gather"]
+FSTEP = GV["fish_speed"] / TICK  # quãng cá bơi mỗi tick
+IDLE = InputState((0.0, 0.0), {}, set())
+
+
+def press(*names):
+    return InputState((0.0, 0.0), {n: True for n in names}, set(names))
+
+
+class FishV11Case(unittest.TestCase):
+    def session(self, scenario=None, seed=42):
+        return Session("gather", V11, scenario or {}, seed)
+
+    @staticmethod
+    def steps(s, n, inp=IDLE):
+        """Chạy n bước (bước đầu dùng `inp`, các bước sau không bấm gì); trả [(tick, name, data)]."""
+        out = []
+        for i in range(n):
+            out += [(r["tick"], r["name"], r["data"]) for r in s.step(inp if i == 0 else IDLE)]
+        return out
+
+    @staticmethod
+    def fishmap(s):
+        """Bản chép các đàn trong snapshot hiện tại, theo id."""
+        return {f["id"]: {"kind": f["kind"], "pos": list(f["pos"]), "heading_deg": f["heading_deg"],
+                          "age_ticks": f["age_ticks"]} for f in s.snapshot()["fish"]}
+
+
+class FishV11SwimSpawn(FishV11Case):
+    """AC-P2-01: 8 đàn đầu ca, bơi, đổi hướng 120, phản xạ, sinh mỗi 360, trần 12, random_fish:false, N5/N6."""
+
+    def test_initial_schools_on_distinct_spawn_points_by_seed(self):
+        fish = self.fishmap(self.session())
+        self.assertEqual(set(fish), {f"F{i}" for i in range(1, GV["fish_initial"] + 1)})
+        self.assertEqual(len({tuple(f["pos"]) for f in fish.values()}), GV["fish_initial"], "điểm khác nhau")
+        for f in fish.values():
+            self.assertIn(f["pos"][0], GV["fish_spawn_x"])
+            self.assertIn(f["pos"][1], GV["fish_spawn_depths"][f["kind"]])
+            self.assertEqual(f["age_ticks"], 0)
+        self.assertEqual(self.fishmap(self.session()), fish, "cùng seed -> cùng bố trí")
+        self.assertNotEqual(self.fishmap(self.session(seed=7)), fish, "seed khác -> bố trí khác")
+
+    def test_schools_stay_in_x_domain_and_species_depth_band(self):
+        s = self.session()
+        lo_x, hi_x = GV["fish_x"]
+        for _ in range(3000):
+            s.step(IDLE)
+            for f in s.snapshot()["fish"]:
+                lo_d, hi_d = GV["fish_depths"][f["kind"]]
+                self.assertTrue(lo_x <= f["pos"][0] <= hi_x and lo_d <= f["pos"][1] <= hi_d, f)
+
+    def test_swim_speed_and_turn_at_swim_step_120_before_moving(self):
+        turn = GV["fish_turn_ticks"]
+        lo, hi = GV["fish_depths"]["ca_keo"]
+        start = [50.0, (lo + hi) / 2]
+        s = self.session({"fish": [{"id": "F1", "kind": "ca_keo", "pos": start, "heading_deg": 0}]})
+        traj = []
+        for _ in range(turn):
+            s.step(IDLE)
+            f = s.snapshot()["fish"][0]
+            traj.append((list(f["pos"]), f["heading_deg"], f["age_ticks"]))
+        for k, (pos, h, age) in enumerate(traj[:-1], start=1):  # bước bơi 1..119: giữ hướng 0, đi đúng FSTEP
+            self.assertEqual((h, age), (0.0, k))
+            self.assertAlmostEqual(pos[0], start[0] + k * FSTEP, places=9)
+            self.assertEqual(pos[1], start[1])
+        (pos, h, age), prev = traj[-1], traj[-2][0]  # bước bơi thứ 120: đổi hướng TRƯỚC khi đi
+        self.assertEqual(age, turn)
+        self.assertNotEqual(h, 0.0)
+        self.assertAlmostEqual(pos[0] - prev[0], FSTEP * math.cos(math.radians(h)), places=9)
+        self.assertAlmostEqual(pos[1] - prev[1], FSTEP * math.sin(math.radians(h)), places=9)
+        s = self.session({"fish": [{"id": "F1", "kind": "ca_keo", "pos": start, "heading_deg": 0,
+                                    "age_ticks": turn - 1}]})
+        s.step(IDLE)
+        f = s.snapshot()["fish"][0]
+        self.assertEqual(f["age_ticks"], turn)
+        self.assertNotEqual(f["heading_deg"], 0.0, "age_ticks từ fixture: bước bơi kế là bước thứ 120")
+
+    def test_reflects_remaining_distance_and_flips_perpendicular_component(self):
+        lo_x, hi_x = GV["fish_x"]
+        lo, hi = GV["fish_depths"]["ca_keo"]
+        mid, c = (lo + hi) / 2, FSTEP * math.cos(math.radians(45))
+        cases = {  # nhãn: (vị trí đầu = vị trí sau một bước phản xạ, hướng đầu, hướng sau)
+            "mép x phải": ([hi_x - FSTEP / 2, mid], 0, 180),
+            "mép x trái": ([lo_x + FSTEP / 2, mid], 180, 0),
+            "đáy dải độ sâu": ([50, hi - FSTEP / 2], 90, 270),
+            "đỉnh dải độ sâu": ([50, lo + FSTEP / 2], 270, 90),
+            "góc": ([hi_x - c / 2, hi - c / 2], 45, 225),
+        }
+        for label, (pos, h, want_h) in cases.items():
+            s = self.session({"fish": [{"id": "F1", "kind": "ca_keo", "pos": pos, "heading_deg": h}]})
+            s.step(IDLE)
+            f = s.snapshot()["fish"][0]
+            self.assertAlmostEqual(f["pos"][0], pos[0], places=9, msg=label)
+            self.assertAlmostEqual(f["pos"][1], pos[1], places=9, msg=label)
+            self.assertAlmostEqual(math.cos(math.radians(f["heading_deg"] - want_h)), 1.0, places=9, msg=label)
+
+    def test_spawn_one_school_at_each_360_phase_ticks_after_swimming(self):
+        every, n0 = GV["fish_spawn_ticks"], GV["fish_initial"]
+        k_max = min(3, GV["fish_max"] - n0)
+        s, log, snaps = self.session(), [], {}
+        for t in range(1, every * k_max + 2):
+            log += [(r["tick"], r["name"], r["data"]) for r in s.step(IDLE)]
+            if t % every in (0, 1):
+                snaps[t] = self.fishmap(s)
+        spawned = [(t, d) for t, n, d in log if n == "fish_spawned"]
+        self.assertEqual([t for t, _ in spawned], [every * k for k in range(1, k_max + 1)])
+        self.assertEqual([d["id"] for _, d in spawned], [f"F{n0 + k}" for k in range(1, k_max + 1)])
+        for t, d in spawned:
+            fish = snaps[t]
+            self.assertIn(d["pos"][0], GV["fish_spawn_x"])
+            self.assertIn(d["pos"][1], GV["fish_spawn_depths"][d["kind"]])
+            self.assertEqual((fish[d["id"]]["pos"], fish[d["id"]]["age_ticks"]), (d["pos"], 0), "chưa bơi ở bước sinh")
+            others = [f["pos"] for i, f in fish.items() if i != d["id"]]
+            self.assertTrue(all(math.dist(d["pos"], q) > GV["fish_spawn_clearance"] for q in others))
+            self.assertEqual(snaps[t + 1][d["id"]]["age_ticks"], 1, "bơi từ bước sau")
+
+    def test_no_spawn_at_fish_max_and_spawn_resumes_below_it(self):
+        every, cap = GV["fish_spawn_ticks"], GV["fish_max"]
+        lo, hi = GV["fish_depths"]["ca_keo"]
+
+        def schools(n):
+            return [{"id": f"F{i}", "kind": "ca_keo", "pos": [5 + 7 * i, (lo + hi) / 2], "heading_deg": 90}
+                    for i in range(1, n + 1)]
+        log = self.steps(self.session({"fish": schools(cap)}), every + 1)
+        self.assertEqual([e for e in log if e[1] == "fish_spawned"], [])
+        log = self.steps(self.session({"fish": schools(cap - 1)}), 2 * every + 1)
+        self.assertEqual([(t, d["id"]) for t, n, d in log if n == "fish_spawned"], [(every, f"F{cap}")])
+
+    def test_spawn_needs_clearance_renormalizes_species_and_skips_without_point(self):
+        """Cá fixture đứng yên (delta fish_speed 0, trần nới rộng) chiếm sẵn điểm sinh để kiểm từng nhánh luật sinh."""
+        still = _merge(V11, {"gather": {"fish_speed": 0.0, "fish_max": 64}})
+        every = GV["fish_spawn_ticks"]
+        depth_kind = {}  # độ sâu điểm sinh -> một loài sinh ở độ sâu đó (điểm hình học dùng chung giữa loài)
+        for kind, depths in GV["fish_spawn_depths"].items():
+            for d in depths:
+                depth_kind.setdefault(d, kind)
+        grid = sorted({(x, d) for x in GV["fish_spawn_x"] for d in depth_kind})
+
+        def spawned(blocked, seed):
+            fish = [{"id": f"F{i}", "kind": depth_kind[d], "pos": [x, d]} for i, (x, d) in enumerate(blocked, 1)]
+            return [d for _, n, d in self.steps(Session("gather", still, {"fish": fish}, seed), every)
+                    if n == "fish_spawned"]
+        for seed in range(10):  # điểm đã có cá không được chọn lại (cách mọi đàn > clearance)
+            got = spawned(grid[:11], seed)
+            self.assertEqual(len(got), 1, seed)
+            self.assertNotIn(tuple(got[0]["pos"]), set(grid[:11]), seed)
+        keo = set(GV["fish_spawn_depths"]["ca_keo"])
+        for seed in range(10):  # loài khác hết điểm -> trọng số chuẩn hóa chỉ còn cá kèo
+            got = spawned([p for p in grid if p[1] not in keo], seed)
+            self.assertEqual([d["kind"] for d in got], ["ca_keo"], seed)
+        self.assertEqual(spawned(grid, 0), [], "hết điểm hình học -> bỏ lượt")
+
+    def test_random_fish_false_keeps_fixture_static_without_turn_or_spawn(self):
+        age = GV["fish_turn_ticks"] - 1
+        s = self.session({"random_fish": False, "fish": [{"id": "F1", "kind": "ca_loc", "pos": [50, 10],
+                                                          "heading_deg": 0, "age_ticks": age}]})
+        log = self.steps(s, GV["fish_spawn_ticks"] + 1)
+        self.assertEqual([e for e in log if e[1] == "fish_spawned"], [])
+        self.assertEqual(self.fishmap(s), {"F1": {"kind": "ca_loc", "pos": [50.0, 10.0], "heading_deg": 0,
+                                                  "age_ticks": age}})
+        self.assertEqual(self.fishmap(self.session({"random_fish": False})), {}, "không fixture -> không cá")
+
+    def test_catch_uses_school_position_before_it_swims(self):
+        fish = [{"id": "F1", "kind": "ca_loc", "pos": [50, 12 + GV["catch_radius"]], "heading_deg": 90}]  # đúng mép,
+        s = self.session({"player": {"pos": [50, 12]}, "fish": fish})                                       # bơi ra xa
+        self.assertEqual([(n, d) for _, n, d in self.steps(s, 1, press("catch"))],
+                         [("fish_caught", {"fish_id": "F1", "kind": "ca_loc", "yield": GV["fish_yield"]["ca_loc"]})])
+
+    def test_two_keo_neo_nodes_n5_n6_are_gatherable(self):
+        nodes = {n["id"]: n for n in GV["nodes"] if n["kind"] == "keo_neo"}
+        self.assertEqual(sorted(nodes), ["N5", "N6"])
+        s = self.session({"player": {"pos": list(nodes["N5"]["pos"])}, "random_fish": False})
+        self.assertEqual([(n, d) for _, n, d in self.steps(s, 1, press("interact"))],
+                         [("gather", {"node_id": "N5", "kind": "keo_neo", "amount": GV["node_yield"]})])
+
+    def test_same_seed_same_timeline_and_different_seed_differs(self):
+        def run(seed):
+            s = self.session(seed=seed)
+            return self.steps(s, 1500), self.fishmap(s)
+        self.assertEqual(run(42), run(42))
+        self.assertNotEqual(run(42), run(7))
 
 
 if __name__ == "__main__":
