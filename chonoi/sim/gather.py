@@ -6,14 +6,12 @@ Mặt cắt dòng sông nhìn NGANG: vị trí `[x, d]` (x sang phải, `d` đ�
 Đã làm sẵn để smoke test chạy được: bơi + tăng/giảm tốc, chặn mép (d không âm), đồng hồ và hết giờ,
 cập bến (`interact` trong vùng bến -> `gather_end` reason `docked`), xuất kho, snapshot đầy đủ trường gather.
 
-Nhóm viết tiếp (đúng thứ tự một bước trong PRD mục 13.8, "Gather"):
-  TODO(nhóm, lát 1): bơi + oxy + biên + giỏ
-      - oxy: dưới nước (d > surface_depth) trừ 1 tick/tick, mặt nước hồi oxygen_refill_per_tick, kẹp [0, max]
-      - ngạt: oxy = 0 và đang dưới nước -> đếm zero_oxy_ticks, đủ choke_interval_ticks thì -1 Máu (choke)
-      - Máu về 0 -> ngất (faint, gather_end reason `fainted`, mất toàn bộ giỏ, kho rỗng)
-      - sự kiện dive / surface / oxygen_empty / choke / faint
-      - giỏ: thứ tự nhặt (LIFO), sức chứa hold_capacity
-  TODO(nhóm, lát 2): hái + bắt cá + cập bến + kho
+Luật của nhóm theo DocsPhase.txt (PRD-0 mục F "Gather", payload event theo mục E), đúng thứ tự một bước:
+  - đã làm: dive / surface khi đổi phía biên mặt nước giữa đầu và cuối bước (pos sau di chuyển); oxy theo d
+    CUỐI bước (mặt nước hồi oxygen_refill_per_tick + reset ngạt, dưới nước -1, kẹp [0, max]), oxygen_empty,
+    đếm ngạt kể cả bước vừa chạm 0 -> đủ choke_interval_ticks thì -1 Máu (choke)
+  TODO(nhóm, lát 1): Máu về 0 -> bỏ giỏ LIFO, faint, gather_end reason `fainted` với kho rỗng, dừng bước
+  TODO(nhóm, lát 2): hái + bắt cá + giỏ (thứ tự nhặt, sức chứa hold_capacity)
       - hái nút ở mặt nước (gather, hold_full), nút mọc lại (node_regrown đã có phần đếm ngược)
       - bắt đàn cá bằng `catch` (fish_caught, hold_full, hồi chiêu catch_cd_ticks, chỉ khi dưới nước)
       - cập bến xét TRƯỚC hái (đã có); ghi kho đúng một lần do runner lo
@@ -74,6 +72,9 @@ class GatherSim:
         self.reputation = tuning["quan"]["reputation_initial"]
         self.done = False
         self.reason = None
+        # hằng luật đọc từ contract MỘT lần (không literal, không tra lại mỗi tick)
+        self._refill = t["oxygen_refill_per_tick"]
+        self._choke_every = t["choke_interval_ticks"]
 
     # --- giao diện cho runner -------------------------------------------------
     def inventory_items(self) -> dict:
@@ -107,11 +108,16 @@ class GatherSim:
                 n["regrow_ticks"] -= 1
                 if n["regrow_ticks"] == 0:
                     events.append(("node_regrown", {"node_id": n["id"]}))
-        # 2. bơi + chặn mép
+        # 2. bơi + chặn mép; so phía biên mặt nước đầu/cuối bước -> dive / surface (pos sau di chuyển)
+        was_surface = self._at_surface()
         self._move(inp)
-        # TODO(nhóm, lát 1): so phân vùng đầu/cuối bước -> dive / surface (data: pos).
-        # TODO(nhóm, lát 1): oxy theo d CUỐI bước (mặt nước hồi, dưới nước trừ), oxygen_empty khi từ dương
-        #   xuống 0, đếm ngạt, choke (-1 Máu). Máu 0 -> faint + gather_end("fainted") với giỏ rỗng, return.
+        surface = self._at_surface()
+        if surface != was_surface:
+            # chép giá trị: self.pos đổi tại chỗ ở bước sau, chonoi.live giữ event theo tham chiếu
+            events.append(("surface" if surface else "dive", {"pos": list(self.pos)}))
+        # oxy theo d CUỐI bước -> oxygen_empty, ngạt (choke)
+        self._breathe(surface, events)
+        # TODO(nhóm, lát 1): Máu 0 -> bỏ giỏ LIFO, faint + gather_end("fainted") với kho rỗng, return.
         # 3. interact: bến trước, rồi hái
         if inp.pressed("interact"):
             if self._in_dock():
@@ -138,6 +144,28 @@ class GatherSim:
         self.done = True
         self.reason = reason
         events.append(("gather_end", {"reason": reason, "inventory": {"items": self.inventory_items()}}))
+
+    def _breathe(self, surface, events):
+        """Oxy theo d CUỐI bước (PRD-0 mục F): mặt nước hồi và reset ngạt; dưới nước trừ 1, kẹp 0.
+
+        Mỗi bước dưới nước kết thúc với oxy 0, kể cả bước vừa chạm 0, tăng zero_oxy_ticks; đủ
+        choke_interval_ticks thì đặt lại về 0, trừ 1 Máu, phát choke. Chạm 0 ở t -> ngạt lần đầu ở t+59.
+        """
+        if surface:
+            self.oxygen_ticks = min(self.oxygen_max, self.oxygen_ticks + self._refill)
+            self.zero_oxy_ticks = 0
+            return
+        if self.oxygen_ticks > 0:
+            self.oxygen_ticks -= 1
+            if self.oxygen_ticks > 0:
+                self.zero_oxy_ticks = 0  # còn oxy thì không có nhịp ngạt (v1.1: reset khi oxy > 0)
+                return
+            events.append(("oxygen_empty", {"oxygen_ticks": 0}))
+        self.zero_oxy_ticks += 1
+        if self.zero_oxy_ticks >= self._choke_every:
+            self.zero_oxy_ticks = 0
+            self.hp -= 1
+            events.append(("choke", {"hp": self.hp}))
 
     def _move(self, inp):
         speed = self.t["swim_speed"]
