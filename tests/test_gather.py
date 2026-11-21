@@ -33,6 +33,8 @@ NODE_YIELD = G["node_yield"]
 FISH_YIELD = G["fish_yield"]
 REGROW = int(round(G["regrow_s"] * TICK))
 CATCH_CD = int(round(G["catch_cooldown_s"] * TICK))
+DOCK = G["dock_pos"]
+DOCK_R = G["dock_radius"]
 TIE = 0.5  # độ lệch biểu diễn chính xác, nằm trong mọi bán kính hợp lệ (0.5–5 m) -> hòa khoảng cách thật
 PRESS_E = [{"tick": 0, "interact": True}]
 PRESS_SPACE = [{"tick": 0, "catch": True}]
@@ -57,17 +59,33 @@ def at(rows):
 
 
 class GatherCase(unittest.TestCase):
-    def play(self, block, inputs=(), ticks=1, every=1):
-        """Chạy gather với fixture `block` (mặc định không cá, không nút); trả các dòng JSONL."""
+    def play(self, block, inputs=(), ticks=1, every=1, inventory_out=False, existing=None):
+        """Chạy gather với fixture `block` (mặc định không cá, không nút); trả các dòng JSONL.
+
+        inventory_out=True: thêm --inventory-out, trả (rows, byte file kho hoặc None nếu file không tồn tại).
+        existing: byte ghi sẵn vào file đích trước khi chạy (kiểm giữ nguyên đường dẫn đích).
+        """
         scenario = {"gather": {"random_fish": False, "nodes": [], "fish": [], **block}}
         with Workdir() as w:
             args = ["--mode", "gather", "--seed", "1", "--ticks", str(ticks), "--snapshot-every", str(every),
                     "--scenario", write_json(w.path("sc.json"), scenario), "--out", w.path("o.jsonl")]
             if inputs:
                 args += ["--inputs", write_json(w.path("in.json"), frames(*inputs))]
+            inv = w.path("kho.json")
+            if existing is not None:
+                with open(inv, "wb") as f:
+                    f.write(existing)
+            if inventory_out:
+                args += ["--inventory-out", inv]
             code, err = run_headless(*args)
             self.assertEqual(code, 0, err)
-            return read_jsonl(w.path("o.jsonl"))
+            rows = read_jsonl(w.path("o.jsonl"))
+            if not inventory_out:
+                return rows
+            if not os.path.exists(inv):
+                return rows, None
+            with open(inv, "rb") as f:
+                return rows, f.read()
 
 
 class SwimOxygenChoke(GatherCase):
@@ -234,6 +252,101 @@ class GatherCatch(GatherCase):
         block = {"player": {"pos": [30, 12]}, "fish": [school("F10", [30, 12 + TIE]), school("F2", [30, 12 - TIE])]}
         rows = self.play(block, PRESS_SPACE, ticks=1)
         self.assertEqual([d["fish_id"] for _, d in ev(rows, "fish_caught")], ["F2"])
+
+
+class EndOfShift(GatherCase):
+    """AC-P1-01 (ngất) và AC-P1-02 (cập bến, bàn giao kho): lý do kết thúc, thứ tự ưu tiên, file kho."""
+
+    def names(self, rows):
+        return [(r["tick"], r["name"]) for r in events(rows)]
+
+    def test_faint_drops_hold_lifo_and_hands_over_empty_inventory(self):
+        player = {"pos": UNDER, "hp": 1, "oxygen_ticks": 0, "zero_oxy_ticks": CHOKE - 1}
+        rows, inv = self.play({"player": player, "hold": ["ca_loc", "bong_sung", "ca_linh"]}, ticks=5,
+                              inventory_out=True)
+        self.assertEqual([(r["tick"], r["name"], r["data"]) for r in events(rows)], [
+            (1, "choke", {"hp": 0}),
+            (1, "faint", {"cause": "choke", "lost": ["ca_linh", "bong_sung", "ca_loc"], "hp": 0}),
+            (1, "gather_end", {"reason": "fainted", "inventory": {"items": {}}})])
+        self.assertEqual(json.loads(inv), {"items": {}})
+        last = snapshots(rows)[-1]
+        self.assertEqual((last["tick"], last["state"], last["hold"], last["hold_count"], last["player"]["hp"]),
+                         (1, "finished", [], 0, 0))
+        self.assertEqual((rows[-1]["type"], rows[-1]["reason"], rows[-1]["ticks"]), ("end", "fainted", 1))
+
+    @unittest.skipIf(DOCK_R <= SD, "cần vùng bến chạm xuống dưới mặt nước")
+    def test_faint_goes_before_dock_and_time_on_the_same_step(self):
+        """Mục F: E ở bến bước cuối chỉ cho docked nếu còn Máu."""
+        player = {"pos": [DOCK[0], (SD + DOCK_R) / 2], "hp": 1, "oxygen_ticks": 0, "zero_oxy_ticks": CHOKE - 1}
+        rows, inv = self.play({"player": player, "hold": ["ca_loc"], "time_left_ticks": 1}, PRESS_E, ticks=5,
+                              inventory_out=True)
+        self.assertEqual(self.names(rows), [(1, "choke"), (1, "faint"), (1, "gather_end")])
+        self.assertEqual((ev(rows, "gather_end")[0][1]["reason"], rows[-1]["reason"]), ("fainted", "fainted"))
+        self.assertEqual(json.loads(inv), {"items": {}})
+
+    def test_dock_goes_before_gather_and_catch(self):
+        cases = {"mặt nước, nút trong tầm": ({"pos": list(DOCK)}, {"nodes": [node("N1", DOCK[0] + TIE)]}, PRESS_E)}
+        if DOCK_R > SD:
+            d = (SD + DOCK_R) / 2
+            cases["dưới nước, đàn trong tầm, E + Space cùng tick"] = (
+                {"pos": [DOCK[0], d]}, {"fish": [school("F1", [DOCK[0], d + TIE])]},
+                [{"tick": 0, "interact": True, "catch": True}])
+        for label, (player, extra, inputs) in cases.items():
+            rows, inv = self.play({"player": player, "hold": ["ca_loc"], **extra}, inputs, ticks=5, inventory_out=True)
+            self.assertEqual(self.names(rows), [(1, "gather_end")], label)
+            self.assertEqual(ev(rows, "gather_end")[0][1], {"reason": "docked", "inventory": {"items": {"ca_loc": 1}}},
+                             label)
+            self.assertEqual(json.loads(inv), {"items": {"ca_loc": 1}}, label)
+
+    def test_interact_at_exact_dock_edge_on_last_step_docks(self):
+        """Mục F: E đúng mép bến ở bước cuối vẫn cho docked (cập bến xét trước hết giờ)."""
+        block = {"player": {"pos": [DOCK[0] + DOCK_R, 0]}, "hold": ["bong_sung"], "time_left_ticks": 1}
+        rows, inv = self.play(block, PRESS_E, ticks=5, inventory_out=True)
+        self.assertEqual(ev(rows, "gather_end"), [(1, {"reason": "docked", "inventory": {"items": {"bong_sung": 1}}})])
+        self.assertEqual(rows[-1]["reason"], "docked")
+        self.assertEqual(json.loads(inv), {"items": {"bong_sung": 1}})
+
+    def test_valid_gather_or_catch_on_last_step_is_handed_over(self):
+        y = FISH_YIELD["ca_linh"]
+        cases = {"hái": ({"player": {"pos": [20, 0]}, "nodes": [node("N1", 20 + TIE)]}, PRESS_E, "gather",
+                         {"bong_sung": NODE_YIELD}),
+                 "bắt": ({"player": {"pos": [30, 12]}, "fish": [school("F1", [30, 12 - TIE])]}, PRESS_SPACE,
+                         "fish_caught", {"ca_linh": y})}
+        for label, (block, inputs, action, items) in cases.items():
+            rows, inv = self.play({**block, "time_left_ticks": 1}, inputs, ticks=5, inventory_out=True)
+            self.assertEqual(self.names(rows), [(1, action), (1, "gather_end")], label)
+            self.assertEqual(ev(rows, "gather_end")[0][1], {"reason": "time", "inventory": {"items": items}}, label)
+            self.assertEqual(json.loads(inv), {"items": items}, label)
+
+    def test_tick_limit_before_gather_end_keeps_existing_file_bytes(self):
+        before = b'{"items":{"ca_loc":9}}\n'
+        rows, inv = self.play({"player": {"pos": UNDER}, "hold": ["ca_linh"]}, ticks=5, inventory_out=True,
+                              existing=before)
+        self.assertEqual(rows[-1]["reason"], "tick_limit")
+        self.assertEqual(inv, before)
+
+    def test_same_seed_same_inputs_give_identical_bytes(self):
+        """Mục E: cùng seed, tham số, đầu vào -> JSONL và file kho giống từng byte; kịch bản có đủ hành động."""
+        block = {"random_fish": False, "player": {"pos": [20, 0]}, "nodes": [node("N1", 20 + TIE)],
+                 "fish": [school("F1", [20, 3])]}
+        inputs = [{"tick": 0, "interact": True}, {"tick": 1, "interact": False, "move": [0, 1]},
+                  {"tick": 45, "move": [0, 0], "catch": True}, {"tick": 46, "catch": False, "move": [-0.986, -0.164]},
+                  {"tick": 400, "move": [0, 0], "interact": True}]
+        outs = []
+        with Workdir() as w:
+            sc = write_json(w.path("sc.json"), {"gather": block})
+            inp = write_json(w.path("in.json"), frames(*inputs))
+            for i in (1, 2):
+                code, err = run_headless("--mode", "gather", "--seed", "7", "--ticks", "600", "--scenario", sc,
+                                         "--inputs", inp, "--snapshot-every", "1", "--inventory-out", w.path(f"k{i}.json"),
+                                         "--out", w.path(f"o{i}.jsonl"))
+                self.assertEqual(code, 0, err)
+                with open(w.path(f"o{i}.jsonl"), "rb") as a, open(w.path(f"k{i}.json"), "rb") as b:
+                    outs.append((a.read(), b.read()))
+            rows = read_jsonl(w.path("o1.jsonl"))
+        self.assertEqual(outs[0], outs[1])
+        self.assertEqual([n for _, n in self.names(rows)], ["gather", "dive", "fish_caught", "surface", "gather_end"])
+        self.assertEqual(rows[-1]["reason"], "docked")
 
 
 if __name__ == "__main__":

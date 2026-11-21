@@ -10,11 +10,13 @@ Luật của nhóm theo DocsPhase.txt (PRD-0 mục F "Gather", payload event the
   - đã làm: dive / surface khi đổi phía biên mặt nước giữa đầu và cuối bước (pos sau di chuyển); oxy theo d
     CUỐI bước (mặt nước hồi oxygen_refill_per_tick + reset ngạt, dưới nước -1, kẹp [0, max]), oxygen_empty,
     đếm ngạt kể cả bước vừa chạm 0 -> đủ choke_interval_ticks thì -1 Máu (choke)
+  - đã làm: Máu về 0 -> bỏ giỏ LIFO, faint {cause, lost, hp}, gather_end reason `fainted` với kho rỗng, dừng
+    bước (ngất đi trước cập bến và hết giờ cùng bước)
   - đã làm: cập bến xét TRƯỚC hái; hái nút ready gần nhất trong interact_radius chỉ ở mặt nước (gather /
     hold_full, đặt regrow_ticks); bắt đúng đàn gần nhất trong catch_radius khi hết hồi và dưới nước
     (fish_caught / hold_full, đặt hồi chiêu); hòa khoảng cách theo id; lấy đủ yield hoặc giữ nguyên, không thử
     ứng viên khác; giỏ theo thứ tự nhặt, sức chứa hold_capacity; ghi kho đúng một lần do runner lo
-  TODO(nhóm, lát 1): Máu về 0 -> bỏ giỏ LIFO, faint, gather_end reason `fainted` với kho rỗng, dừng bước
+  - có sẵn: hết giờ -> gather_end reason `time` ở mọi độ sâu, sau các hành động hợp lệ của bước, giữ giỏ
 Các tính năng của phase sau chưa nằm trong khung này.
 """
 
@@ -123,9 +125,9 @@ class GatherSim:
         if surface != was_surface:
             # chép giá trị: self.pos đổi tại chỗ ở bước sau, chonoi.live giữ event theo tham chiếu
             events.append(("surface" if surface else "dive", {"pos": list(self.pos)}))
-        # oxy theo d CUỐI bước -> oxygen_empty, ngạt (choke)
-        self._breathe(surface, events)
-        # TODO(nhóm, lát 1): Máu 0 -> bỏ giỏ LIFO, faint + gather_end("fainted") với kho rỗng, return.
+        # oxy theo d CUỐI bước -> oxygen_empty, ngạt (choke); Máu 0 -> ngất, dừng bước
+        if self._breathe(surface, events):
+            return events
         # 3. interact: bến trước, rồi hái
         if inp.pressed("interact"):
             if self._in_dock():
@@ -153,27 +155,47 @@ class GatherSim:
         self.reason = reason
         events.append(("gather_end", {"reason": reason, "inventory": {"items": self.inventory_items()}}))
 
-    def _breathe(self, surface, events):
+    def _breathe(self, surface, events) -> bool:
         """Oxy theo d CUỐI bước (PRD-0 mục F): mặt nước hồi và reset ngạt; dưới nước trừ 1, kẹp 0.
 
         Mỗi bước dưới nước kết thúc với oxy 0, kể cả bước vừa chạm 0, tăng zero_oxy_ticks; đủ
         choke_interval_ticks thì đặt lại về 0, trừ 1 Máu, phát choke. Chạm 0 ở t -> ngạt lần đầu ở t+59.
+        Trả True khi Máu về 0 và đã ngất (buổi sáng kết thúc, bước phải dừng).
         """
         if surface:
             self.oxygen_ticks = min(self.oxygen_max, self.oxygen_ticks + self._refill)
             self.zero_oxy_ticks = 0
-            return
+            return False
         if self.oxygen_ticks > 0:
             self.oxygen_ticks -= 1
             if self.oxygen_ticks > 0:
                 self.zero_oxy_ticks = 0  # còn oxy thì không có nhịp ngạt (v1.1: reset khi oxy > 0)
-                return
+                return False
             events.append(("oxygen_empty", {"oxygen_ticks": 0}))
         self.zero_oxy_ticks += 1
-        if self.zero_oxy_ticks >= self._choke_every:
-            self.zero_oxy_ticks = 0
-            self.hp -= 1
-            events.append(("choke", {"hp": self.hp}))
+        if self.zero_oxy_ticks < self._choke_every:
+            return False
+        self.zero_oxy_ticks = 0
+        self.hp -= 1
+        events.append(("choke", {"hp": self.hp}))
+        if self.hp > 0:
+            return False
+        self._faint("choke", events)
+        return True
+
+    def _faint(self, cause, events):
+        """Máu 0: bỏ toàn bộ giỏ theo LIFO, phát faint rồi gather_end(fainted) với kho rỗng."""
+        lost = self._drop_lifo(len(self.hold))
+        events.append(("faint", {"cause": cause, "lost": lost, "hp": self.hp}))
+        self._finish("fainted", events)
+
+    def _drop_lifo(self, n) -> list:
+        """Bỏ n món mới nhất khỏi giỏ (nhặt sau bỏ trước); trả các món theo thứ tự bỏ. Một bản sao, đảo tại chỗ."""
+        k = max(0, len(self.hold) - n)
+        lost = self.hold[k:]
+        lost.reverse()
+        del self.hold[k:]
+        return lost
 
     def _nearest(self, coll, radius):
         """Thực thể gần nhất trong `radius` (tính cả đúng mép), hòa khoảng cách theo id; None nếu không có.
