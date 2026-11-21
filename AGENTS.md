@@ -6,6 +6,7 @@
 - Test: `PYTHONPATH=tests:. python3 -m unittest discover -s tests -v`
 - Headless: `python3 -m chonoi.headless --mode gather|quan --seed 1 --ticks 600 --out out.jsonl`
 - Chơi thử trên trình duyệt: `python3 -m chonoi.live --mode gather|quan` (mở địa chỉ in ra; WASD, E, Space, R)
+- PowerShell: `$env:PYTHONPATH='tests;.'; $env:PYTHONUTF8='1'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`. Nếu smoke gọi alias `python3` ngoài môi trường, báo Khôi chỉnh helper test dùng chung.
 
 ## Cấu trúc & quy ước
 - (Starter Python là TÙY CHỌN; nhóm có thể dùng ngôn ngữ khác nếu giữ Test Contract.) Khung do giảng viên cấp: `chonoi/{headless,inputs,scenario,contract,rng,ids,jsonl,inventory,runner,live}.py` và `chonoi/web/`. Hạn chế sửa; nếu phải sửa thì báo cả nhóm và ghi lại lý do.
@@ -21,7 +22,10 @@
 - Không sửa test cho xanh khi luật sai; phải sửa luật hoặc ghi lý do đổi test trong commit.
 
 ## Quy tắc làm việc với agent
+- Codex hỗ trợ gợi ý, soạn nháp và kiểm tra. Thành viên phụ trách tự review phần của mình. Khôi review và xác nhận nội dung dùng chung. Trong tài liệu, ghi đề xuất đang chờ review cho tới khi người phụ trách thực sự xác nhận.
 - Mỗi agent một việc rõ ràng (một lát). Cho agent đọc PRD/ticket đúng phase và hợp đồng kho trước.
+- Diên giữ `sim/gather.py`, Nhân giữ `sim/quan.py`, Khôi giữ HUD, manifest, runner và kiểm tích hợp. Thay đổi dùng chung báo Khôi trước.
+- Đặt kit, fixture thử tay và output tạm dưới `tmp/`. Stage từng đường dẫn đã rà diff. Phần phụ thuộc chưa vào `main` thì ghi việc đang chờ và dừng tại đó.
 - Agent làm xong phải chạy test và ghi kết quả vào mô tả commit hoặc `docs/proof/`; người đọc lại thay đổi trước khi đẩy.
 - Sáng tạo thêm được khuyến khích nhưng phải tắt ở headless (xem README, mục "Tự do sáng tạo").
 
