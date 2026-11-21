@@ -6,23 +6,24 @@ Mặt cắt dòng sông nhìn NGANG: vị trí `[x, d]` (x sang phải, `d` đ�
 Đã làm sẵn để smoke test chạy được: bơi + tăng/giảm tốc, chặn mép (d không âm), đồng hồ và hết giờ,
 cập bến (`interact` trong vùng bến -> `gather_end` reason `docked`), xuất kho, snapshot đầy đủ trường gather.
 
-Nhóm viết tiếp (đúng thứ tự một bước trong PRD mục 13.8, "Gather"):
-  TODO(nhóm, lát 1): bơi + oxy + biên + giỏ
-      - oxy: dưới nước (d > surface_depth) trừ 1 tick/tick, mặt nước hồi oxygen_refill_per_tick, kẹp [0, max]
-      - ngạt: oxy = 0 và đang dưới nước -> đếm zero_oxy_ticks, đủ choke_interval_ticks thì -1 Máu (choke)
-      - Máu về 0 -> ngất (faint, gather_end reason `fainted`, mất toàn bộ giỏ, kho rỗng)
-      - sự kiện dive / surface / oxygen_empty / choke / faint
-      - giỏ: thứ tự nhặt (LIFO), sức chứa hold_capacity
-  TODO(nhóm, lát 2): hái + bắt cá + cập bến + kho
-      - hái nút ở mặt nước (gather, hold_full), nút mọc lại (node_regrown đã có phần đếm ngược)
-      - bắt đàn cá bằng `catch` (fish_caught, hold_full, hồi chiêu catch_cd_ticks, chỉ khi dưới nước)
-      - cập bến xét TRƯỚC hái (đã có); ghi kho đúng một lần do runner lo
+Luật của nhóm theo DocsPhase.txt (PRD-0 mục F "Gather", payload event theo mục E), đúng thứ tự một bước:
+  - đã làm: dive / surface khi đổi phía biên mặt nước giữa đầu và cuối bước (pos sau di chuyển); oxy theo d
+    CUỐI bước (mặt nước hồi oxygen_refill_per_tick + reset ngạt, dưới nước -1, kẹp [0, max]), oxygen_empty,
+    đếm ngạt kể cả bước vừa chạm 0 -> đủ choke_interval_ticks thì -1 Máu (choke)
+  - đã làm: Máu về 0 -> bỏ giỏ LIFO, faint {cause, lost, hp}, gather_end reason `fainted` với kho rỗng, dừng
+    bước (ngất đi trước cập bến và hết giờ cùng bước)
+  - đã làm: cập bến xét TRƯỚC hái; hái nút ready gần nhất trong interact_radius chỉ ở mặt nước (gather /
+    hold_full, đặt regrow_ticks); bắt đúng đàn gần nhất trong catch_radius khi hết hồi và dưới nước
+    (fish_caught / hold_full, đặt hồi chiêu); hòa khoảng cách theo id; lấy đủ yield hoặc giữ nguyên, không thử
+    ứng viên khác; giỏ theo thứ tự nhặt, sức chứa hold_capacity; ghi kho đúng một lần do runner lo
+  - có sẵn: hết giờ -> gather_end reason `time` ở mọi độ sâu, sau các hành động hợp lệ của bước, giữ giỏ
 Các tính năng của phase sau chưa nằm trong khung này.
 """
 
 import math
+from itertools import repeat
 
-from ..ids import sort_by_id
+from ..ids import id_key, sort_by_id
 from ..inventory import hold_to_items
 from .ramp import ramp_velocity
 
@@ -74,6 +75,16 @@ class GatherSim:
         self.reputation = tuning["quan"]["reputation_initial"]
         self.done = False
         self.reason = None
+        # hằng luật đọc từ contract MỘT lần (không literal, không tra lại mỗi tick)
+        self._refill = t["oxygen_refill_per_tick"]
+        self._choke_every = t["choke_interval_ticks"]
+        self._cap = t["hold_capacity"]
+        self._node_yield = t["node_yield"]
+        self._fish_yield = t["fish_yield"]
+        self._r_interact = t["interact_radius"]
+        self._r_catch = t["catch_radius"]
+        self._regrow_full = int(round(t["regrow_s"] * TICK))
+        self._catch_cd_full = int(round(t["catch_cooldown_s"] * TICK))
 
     # --- giao diện cho runner -------------------------------------------------
     def inventory_items(self) -> dict:
@@ -107,21 +118,26 @@ class GatherSim:
                 n["regrow_ticks"] -= 1
                 if n["regrow_ticks"] == 0:
                     events.append(("node_regrown", {"node_id": n["id"]}))
-        # 2. bơi + chặn mép
+        # 2. bơi + chặn mép; so phía biên mặt nước đầu/cuối bước -> dive / surface (pos sau di chuyển)
+        was_surface = self._at_surface()
         self._move(inp)
-        # TODO(nhóm, lát 1): so phân vùng đầu/cuối bước -> dive / surface (data: pos).
-        # TODO(nhóm, lát 1): oxy theo d CUỐI bước (mặt nước hồi, dưới nước trừ), oxygen_empty khi từ dương
-        #   xuống 0, đếm ngạt, choke (-1 Máu). Máu 0 -> faint + gather_end("fainted") với giỏ rỗng, return.
+        surface = self._at_surface()
+        if surface != was_surface:
+            # chép giá trị: self.pos đổi tại chỗ ở bước sau, chonoi.live giữ event theo tham chiếu
+            events.append(("surface" if surface else "dive", {"pos": list(self.pos)}))
+        # oxy theo d CUỐI bước -> oxygen_empty, ngạt (choke); Máu 0 -> ngất, dừng bước
+        if self._breathe(surface, events):
+            return events
         # 3. interact: bến trước, rồi hái
         if inp.pressed("interact"):
             if self._in_dock():
                 self._finish("docked", events)
                 return events
-            # TODO(nhóm, lát 2): chỉ khi ở mặt nước: hái nút `ready` gần nhất trong interact_radius
-            #   (id nhỏ khi bằng nhau): gather / hold_full; đặt regrow_ticks cho nút.
-        # 4. bắt cá
-        if inp.pressed("catch"):
-            pass  # TODO(nhóm, lát 2): chỉ khi catch_cd_ticks == 0 và dưới nước: fish_caught / hold_full.
+            if surface:  # ngoài bến chỉ hái khi ở mặt nước
+                self._gather_node(events)
+        # 4. bắt cá: chỉ khi hết hồi và đang dưới nước
+        if inp.pressed("catch") and self.catch_cd_ticks == 0 and not surface:
+            self._catch_fish(events)
         # 5. hết giờ
         if self.time_left_ticks <= 0:
             self._finish("time", events)
@@ -138,6 +154,94 @@ class GatherSim:
         self.done = True
         self.reason = reason
         events.append(("gather_end", {"reason": reason, "inventory": {"items": self.inventory_items()}}))
+
+    def _breathe(self, surface, events) -> bool:
+        """Oxy theo d CUỐI bước (PRD-0 mục F): mặt nước hồi và reset ngạt; dưới nước trừ 1, kẹp 0.
+
+        Mỗi bước dưới nước kết thúc với oxy 0, kể cả bước vừa chạm 0, tăng zero_oxy_ticks; đủ
+        choke_interval_ticks thì đặt lại về 0, trừ 1 Máu, phát choke. Chạm 0 ở t -> ngạt lần đầu ở t+59.
+        Trả True khi Máu về 0 và đã ngất (buổi sáng kết thúc, bước phải dừng).
+        """
+        if surface:
+            self.oxygen_ticks = min(self.oxygen_max, self.oxygen_ticks + self._refill)
+            self.zero_oxy_ticks = 0
+            return False
+        if self.oxygen_ticks > 0:
+            self.oxygen_ticks -= 1
+            if self.oxygen_ticks > 0:
+                self.zero_oxy_ticks = 0  # còn oxy thì không có nhịp ngạt (v1.1: reset khi oxy > 0)
+                return False
+            events.append(("oxygen_empty", {"oxygen_ticks": 0}))
+        self.zero_oxy_ticks += 1
+        if self.zero_oxy_ticks < self._choke_every:
+            return False
+        self.zero_oxy_ticks = 0
+        self.hp -= 1
+        events.append(("choke", {"hp": self.hp}))
+        if self.hp > 0:
+            return False
+        self._faint("choke", events)
+        return True
+
+    def _faint(self, cause, events):
+        """Máu 0: bỏ toàn bộ giỏ theo LIFO, phát faint rồi gather_end(fainted) với kho rỗng."""
+        lost = self._drop_lifo(len(self.hold))
+        events.append(("faint", {"cause": cause, "lost": lost, "hp": self.hp}))
+        self._finish("fainted", events)
+
+    def _drop_lifo(self, n) -> list:
+        """Bỏ n món mới nhất khỏi giỏ (nhặt sau bỏ trước); trả các món theo thứ tự bỏ. Một bản sao, đảo tại chỗ."""
+        k = max(0, len(self.hold) - n)
+        lost = self.hold[k:]
+        lost.reverse()
+        del self.hold[k:]
+        return lost
+
+    def _nearest(self, coll, radius):
+        """Thực thể gần nhất trong `radius` (tính cả đúng mép), hòa khoảng cách theo id; None nếu không có.
+
+        Một lượt qua `coll`, chọn bằng min (lõi C). Thực thể gần nhất ngoài tầm thì mọi thực thể đều ngoài tầm.
+        id duy nhất trong mỗi danh sách nên tuple không bao giờ phải so tới dict.
+        """
+        best = min(((math.dist(self.pos, e["pos"]), id_key(e["id"]), e) for e in coll), default=None)
+        return best[2] if best is not None and best[0] <= radius else None
+
+    def _room(self) -> int:
+        return self._cap - len(self.hold)
+
+    def _put(self, kind, n):
+        """Thêm n nguyên liệu `kind` vào cuối giỏ (thứ tự nhặt, mới nhất cuối)."""
+        self.hold.extend(repeat(kind, n))
+
+    def _gather_node(self, events):
+        """Hái nút ready gần nhất trong interact_radius: đủ chỗ thì lấy và đặt mọc lại, thiếu chỗ giữ nguyên nút."""
+        node = self._nearest((n for n in self.nodes if n["regrow_ticks"] == 0), self._r_interact)
+        if node is None:
+            return
+        need, free = self._node_yield, self._room()
+        if free < need:
+            events.append(("hold_full", {"action": "gather", "node_id": node["id"], "required": need, "free": free}))
+            return
+        self._put(node["kind"], need)
+        node["regrow_ticks"] = self._regrow_full
+        events.append(("gather", {"node_id": node["id"], "kind": node["kind"], "amount": need}))
+
+    def _catch_fish(self, events):
+        """Bắt đúng đàn gần nhất trong catch_radius: lấy cả yield, xoá đàn, đặt hồi chiêu.
+
+        Thiếu chỗ: hold_full, giữ đàn và cooldown, không thử đàn khác. Không đàn trong tầm: không event, không hồi.
+        """
+        fish = self._nearest(self.fish, self._r_catch)
+        if fish is None:
+            return
+        need, free = self._fish_yield[fish["kind"]], self._room()
+        if free < need:
+            events.append(("hold_full", {"action": "catch", "fish_id": fish["id"], "required": need, "free": free}))
+            return
+        self._put(fish["kind"], need)
+        self.fish.remove(fish)
+        self.catch_cd_ticks = self._catch_cd_full
+        events.append(("fish_caught", {"fish_id": fish["id"], "kind": fish["kind"], "yield": need}))
 
     def _move(self, inp):
         speed = self.t["swim_speed"]
