@@ -28,6 +28,12 @@ def load_contract(path=DEFAULT_PATH) -> dict:
     if not isinstance(c, dict):
         raise BadInput("manifest phải là object")
     validate_tuning(c.get("tuning"), phase2=c.get("contract_version") in ("1.1", "1.2", "1.3"))
+    if c.get("contract_version") in ("1.2", "1.3"):
+        freshness = c["tuning"].get("freshness")
+        required = {"initial": 100, "gather_decay_per_s": 0.5, "quan_decay_per_s": 0.25, "spoiled_below": 30}
+        if (not isinstance(freshness, dict)
+                or any(not _num(freshness.get(key)) or freshness[key] != value for key, value in required.items())):
+            raise BadInput("tuning.freshness không khớp bộ số chuẩn v1.2")
     return c
 
 

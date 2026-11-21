@@ -142,6 +142,8 @@ class LiveGame:
                 snap["supports_pause"] = True
                 snap["menu"] = self.tuning["menu"]
                 snap["shift_earned"] = getattr(self.session.sim, "shift_earned", 0)
+            if "freshness" in self.tuning:
+                snap["freshness"] = self.tuning["freshness"]
             if self.mode == "day":
                 snap["screen"] = self.screen
                 snap["shift"] = dict(self.shift)
@@ -293,13 +295,15 @@ def main(argv=None) -> int:
             raise BadInput("--inventory chỉ dùng với quan")
         if a.inventory_out and a.mode != "gather":
             raise BadInput("--inventory-out chỉ dùng với gather")
-        tuning = load_contract()["tuning"]
+        contract = load_contract()
+        tuning = contract["tuning"]
         if a.mode == "day" and "shop" not in tuning:
             raise BadInput("--mode day cần contract v1.1")
         if a.days is not None and (a.mode != "day" or not 1 <= a.days <= 5):
             raise BadInput("--days chỉ dùng với day và phải nằm trong [1, 5]")
         scenario = load_scenario(a.scenario, a.mode, tuning)
-        inventory = read_inventory(a.inventory, inventory_kinds(tuning)) if a.inventory else None
+        inventory = (read_inventory(a.inventory, inventory_kinds(tuning), contract_version=contract["contract_version"])
+                     if a.inventory else None)
         if inventory is not None and "stock" in scenario:
             raise BadInput("vừa có quan.stock vừa có --inventory")
         game = LiveGame(a.mode, tuning, scenario, a.seed, inventory, a.inventory_out, days=a.days or 5)

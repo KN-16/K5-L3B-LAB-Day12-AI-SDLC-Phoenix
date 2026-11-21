@@ -7,9 +7,11 @@ phải có đúng một món, khách eating thiếu giá/tip...) — xem PRD-0 m
 
 import json
 import math
+from fractions import Fraction
 
 from .errors import BadInput
 from .day import day_plans, gather_tuning
+from .freshness import parse_items
 from .inventory import inventory_kinds, validate_items
 
 GATHER_KEYS = {"player", "hold", "nodes", "fish", "random_fish", "time_left_ticks"}
@@ -34,13 +36,27 @@ def _check_ids(name, arr):
         seen.add(e["id"])
 
 
+def _ordinary_numbers(value):
+    if isinstance(value, Fraction):
+        return float(value)
+    if isinstance(value, list):
+        return [_ordinary_numbers(item) for item in value]
+    return value
+
+
+def _keep_fresh_precision(obj):
+    # object_hook đã xử lý từng dict con, giữ phân số riêng cho trường fresh.
+    return {key: value if key == "fresh" else _ordinary_numbers(value) for key, value in obj.items()}
+
+
 def load_scenario(path, mode: str, tuning: dict) -> dict:
     if path is None:
         return {}
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError) as e:
+            options = {"parse_float": Fraction, "object_hook": _keep_fresh_precision} if "freshness" in tuning else {}
+            data = json.load(f, **options)
+    except (OSError, OverflowError, ValueError) as e:
         raise BadInput(f"không đọc được scenario {path}: {e}")
     allowed = {"day", "gather", "quan"} if mode == "day" else {mode}
     if not isinstance(data, dict) or set(data) - allowed:
@@ -124,7 +140,10 @@ def _validate_gather(b, tuning):
         raise BadInput("random_fish phải là boolean")
     if "hold" in b:
         h = b["hold"]
-        if not isinstance(h, list) or any(k not in inventory_kinds(tuning) for k in h):
+        kinds = inventory_kinds(tuning)
+        if "freshness" in tuning:
+            b["hold"] = parse_items(h, kinds)
+        elif not isinstance(h, list) or any(k not in kinds for k in h):
             raise BadInput("hold phải là mảng id nguyên liệu hợp lệ")
         if len(h) > g["hold_capacity"]:
             raise BadInput("hold vượt sức chứa")
@@ -215,7 +234,11 @@ def _validate_quan(b, tuning):
         if arr in b:
             _check_ids(arr, b[arr])
     if "stock" in b:
-        validate_items(b["stock"], inventory_kinds(tuning))
+        kinds = inventory_kinds(tuning)
+        if "freshness" in tuning:
+            b["stock"] = parse_items(b["stock"], kinds)
+        else:
+            validate_items(b["stock"], kinds)
     p = b.get("player", {})
     if not isinstance(p, dict) or set(p) - QUAN_PLAYER_KEYS:
         raise BadInput("quan.player chỉ có pos và vel")

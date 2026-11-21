@@ -67,7 +67,8 @@ def main(argv=None) -> int:
             raise BadInput("các đường dẫn đầu vào/đầu ra phải khác nhau")
         scenario = load_scenario(a.scenario, a.mode, tuning)
         frames = load_frames(a.inputs, BUTTONS_V11 if phase2 else BUTTONS_V10, allow_buy=phase2)
-        inventory = read_inventory(a.inventory, inventory_kinds(tuning)) if a.inventory else None
+        inventory = (read_inventory(a.inventory, inventory_kinds(tuning), contract_version=contract["contract_version"])
+                     if a.inventory else None)
         if inventory is not None and "stock" in scenario:
             raise BadInput("vừa có quan.stock vừa có --inventory")
     except BadInput as e:

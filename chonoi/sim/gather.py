@@ -39,8 +39,9 @@ import bisect
 import math
 from itertools import repeat
 
+from ..freshness import age_items, new_item, parse_items, view_items
 from ..ids import id_key, sort_by_id
-from ..inventory import hold_to_items
+from ..inventory import hold_to_items, inventory_kinds
 from .ramp import ramp_velocity
 
 TICK = 60.0
@@ -69,7 +70,13 @@ class GatherSim:
         self.zero_oxy_ticks = p.get("zero_oxy_ticks", 0)
         self.invuln_ticks = p.get("invuln_ticks", 0)
         self.catch_cd_ticks = p.get("catch_cd_ticks", 0)
-        self.hold = list(scenario.get("hold", []))  # thứ tự nhặt, cuối mảng là mới nhất
+        self.freshness = tuning.get("freshness")
+        self.tick_hz = tuning["tick_hz"]
+        hold = scenario.get("hold", [])
+        self.hold = parse_items(hold, inventory_kinds(tuning)) if self.freshness else list(hold)
+        if self.freshness:
+            for item in self.hold:
+                ids.reserve(item["id"])
         self.time_left_ticks = scenario.get("time_left_ticks", int(round(t["duration_s"] * TICK)))
         # nút và đàn cá: scenario THAY THẾ danh sách mặc định; random_fish=false tắt cá mặc định
         src_nodes = scenario["nodes"] if "nodes" in scenario else t["nodes"]
@@ -156,8 +163,13 @@ class GatherSim:
                         break
 
     # --- giao diện cho runner -------------------------------------------------
-    def inventory_items(self) -> dict:
+    def inventory_items(self):
+        if self.freshness:
+            return [item.copy() for item in sort_by_id(self.hold)]
         return hold_to_items(self.hold)
+
+    def _hold_view(self, items):
+        return view_items(items, self.freshness["spoiled_below"]) if self.freshness else list(items)
 
     def snapshot(self) -> dict:
         return {
@@ -166,7 +178,7 @@ class GatherSim:
                        "hp": self.hp, "hp_max": self.t["hp_max"], "zero_oxy_ticks": self.zero_oxy_ticks,
                        "invuln_ticks": self.invuln_ticks, "catch_cd_ticks": self.catch_cd_ticks,
                        "at_surface": self._at_surface()},
-            "hold": self.hold, "hold_count": len(self.hold),
+            "hold": self._hold_view(self.hold), "hold_count": len(self.hold),
             "hold_capacity": self.t["hold_capacity"],
             "nodes": [{"id": n["id"], "pos": n["pos"], "kind": n["kind"],
                        "ready": n["regrow_ticks"] == 0, "regrow_ticks": n["regrow_ticks"]}
@@ -197,6 +209,9 @@ class GatherSim:
                 n["regrow_ticks"] -= 1
                 if n["regrow_ticks"] == 0:
                     events.append(("node_regrown", {"node_id": n["id"]}))
+        if self.freshness:
+            events.extend(age_items(self.hold, self.freshness["gather_decay_per_s"], self.tick_hz,
+                                    self.freshness["spoiled_below"], "hold"))
         # 2. bơi + chặn mép; so phía biên mặt nước đầu/cuối bước -> dive / surface (pos sau di chuyển)
         was_surface = self._at_surface()
         self._move(inp)
@@ -239,7 +254,10 @@ class GatherSim:
     def _finish(self, reason, events):
         self.done = True
         self.reason = reason
-        events.append(("gather_end", {"reason": reason, "inventory": {"items": self.inventory_items()}}))
+        items = self.inventory_items()
+        if self.freshness:
+            items = self._hold_view(items)
+        events.append(("gather_end", {"reason": reason, "inventory": {"items": items}}))
 
     def _breathe(self, surface, events) -> bool:
         """Oxy theo d CUỐI bước (PRD-0 mục F): mặt nước hồi và reset ngạt; dưới nước trừ 1, kẹp 0.
@@ -281,7 +299,7 @@ class GatherSim:
         lost = self.hold[k:]
         lost.reverse()
         del self.hold[k:]
-        return lost
+        return self._hold_view(lost)
 
     def _nearest(self, coll, radius):
         """Thực thể gần nhất trong `radius` (tính cả đúng mép), hòa khoảng cách theo id; None nếu không có.
@@ -297,7 +315,10 @@ class GatherSim:
 
     def _put(self, kind, n):
         """Thêm n nguyên liệu `kind` vào cuối giỏ (thứ tự nhặt, mới nhất cuối)."""
-        self.hold.extend(repeat(kind, n))
+        if self.freshness:
+            self.hold.extend(new_item(self.ids, kind, self.freshness["initial"]) for _ in range(n))
+        else:
+            self.hold.extend(repeat(kind, n))
 
     def _gather_node(self, events):
         """Hái nút ready gần nhất trong interact_radius: đủ chỗ thì lấy và đặt mọc lại, thiếu chỗ giữ nguyên nút."""

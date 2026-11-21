@@ -20,7 +20,8 @@ from chonoi.inputs import InputState
 from chonoi.rng import Streams
 from chonoi.runner import Session
 from chonoi.sim.gather import GatherSim
-from helpers import ROOT, Workdir, events, frames, read_jsonl, run_headless, snapshots, write_json
+from helpers import (ROOT, Workdir, events, frames, ingredient_fixture, item_schema_enabled,
+                     read_jsonl, run_headless, snapshots, stock_counts, write_json)
 
 TICK = 60
 
@@ -75,6 +76,8 @@ class GatherCase(unittest.TestCase):
         existing: byte ghi sẵn vào file đích trước khi chạy (kiểm giữ nguyên đường dẫn đích).
         """
         scenario = {"gather": {"random_fish": False, "nodes": [], "fish": [], **block}}
+        if "hold" in block:
+            scenario["gather"]["hold"] = ingredient_fixture(block["hold"])
         with Workdir() as w:
             args = ["--mode", "gather", "--seed", "1", "--ticks", str(ticks), "--snapshot-every", str(every),
                     "--scenario", write_json(w.path("sc.json"), scenario), "--out", w.path("o.jsonl")]
@@ -89,12 +92,25 @@ class GatherCase(unittest.TestCase):
             code, err = run_headless(*args)
             self.assertEqual(code, 0, err)
             rows = read_jsonl(w.path("o.jsonl"))
+            # Hồi quy luật P1 đối chiếu theo loại. Kiểm schema, ID và độ tươi riêng ở v1.2.
+            if item_schema_enabled():
+                for snapshot in snapshots(rows):
+                    snapshot["hold"] = [item["kind"] for item in snapshot["hold"]]
+                for row in events(rows):
+                    data = row["data"]
+                    if row["name"] == "gather_end":
+                        data["inventory"]["items"] = stock_counts(data["inventory"]["items"])
+                    if "lost" in data:
+                        data["lost"] = [item["kind"] for item in data["lost"]]
             if not inventory_out:
                 return rows
             if not os.path.exists(inv):
                 return rows, None
             with open(inv, "rb") as f:
-                return rows, f.read()
+                stored = f.read()
+            if item_schema_enabled() and existing is None:
+                stored = json.dumps({"items": stock_counts(json.loads(stored)["items"])}).encode()
+            return rows, stored
 
 
 class SwimOxygenChoke(GatherCase):
@@ -378,6 +394,7 @@ def tuning_v11():
 
 
 V11 = tuning_v11()
+V11.pop("freshness", None)
 GV = V11["gather"]
 FSTEP = GV["fish_speed"] / TICK  # quãng cá bơi mỗi tick
 IDLE = InputState((0.0, 0.0), {}, set())
