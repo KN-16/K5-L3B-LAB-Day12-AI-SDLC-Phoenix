@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 from chonoi.contract import load_contract
@@ -27,7 +28,8 @@ def cooked_dish(order_id="C1", base_price=60):
 class QuanTests(unittest.TestCase):
     def setUp(self):
         self.tuning = load_contract()["tuning"]
-        # The Phase 1 fixtures arrange extra tables explicitly.
+        # Preserve count-based fixtures and explicit layouts after v1.2 is enabled.
+        self.tuning.pop("freshness", None)
         quan = self.tuning["quan"]
         quan["stoves"] = [stove for stove in quan["stoves"] if stove["id"] == "B1"]
         quan["tables"] = [table for table in quan["tables"] if table["id"] == "T1"]
@@ -266,6 +268,7 @@ class QuanTests(unittest.TestCase):
 class QuanPhase2Tests(unittest.TestCase):
     def setUp(self):
         self.tuning = load_contract()["tuning"]
+        self.tuning.pop("freshness", None)
         delta_path = Path(ROOT) / "docs" / "contracts" / "phase-2.tuning.json"
         delta = json.loads(delta_path.read_text(encoding="utf-8"))["tuning"]
         self.tuning["quan"].update(delta["quan"])
@@ -382,3 +385,157 @@ class QuanPhase2Tests(unittest.TestCase):
         })
         self.assertEqual(sim.snapshot()["stock"], {"ca_keo": 2})
         self.assertEqual(sim.snapshot()["customers"], [])
+
+
+def stock_item(item_id, fresh, kind="ca_loc"):
+    return {"id": item_id, "kind": kind, "fresh": fresh}
+
+
+class QuanPhase3Tests(unittest.TestCase):
+    def setUp(self):
+        self.tuning = load_contract()["tuning"]
+        # Activate the documented v1.2 rules without switching the shared manifest.
+        self.tuning["freshness"] = {
+            "initial": 100, "gather_decay_per_s": 0.5,
+            "quan_decay_per_s": 0.25, "spoiled_below": 30,
+        }
+
+    def make_quan(self, inventory=None, **scenario):
+        return QuanSim(self.tuning, {"random_customers": False, **scenario}, Streams(42), IdAllocator(),
+                       inventory=inventory)
+
+    @staticmethod
+    def play(sim, ticks, frames=()):
+        inputs = InputPlayer(frames)
+        events = []
+        start_tick = sim.phase_tick
+        for tick in range(start_tick, start_tick + ticks):
+            events.extend((tick + 1, name, data) for name, data in sim.step(inputs.advance(tick)))
+            if sim.done:
+                break
+        return events
+
+    def test_fixture_assigns_remaining_items_by_order_then_freshness_and_id(self):
+        stock = [stock_item("I10", 80), stock_item("I99", 100), stock_item("I2", 80), stock_item("I1", 29)]
+        sim = self.make_quan(stock, customers=[
+            customer(id="C3", table_id="T3", order_tick=9, reserved=["I99"]),
+            customer(id="C2", table_id="T2", order_tick=1),
+            customer(order_tick=1),
+        ])
+        snap = sim.snapshot()
+        self.assertEqual([row["reserved"] for row in snap["customers"]], [["I2"], ["I10"], ["I99"]])
+        self.assertEqual([item["id"] for item in snap["stock"]], ["I1", "I2", "I10", "I99"])
+        self.assertEqual(snap["stock"][0]["fresh"], 29)
+
+    def test_unsupplied_stock_is_empty_and_scenario_stock_is_available_at_tick_zero(self):
+        self.assertEqual(self.make_quan().snapshot()["stock"], [])
+        stock = [stock_item("I1", 30)]
+        sim = self.make_quan(stock=stock)
+        self.assertEqual(sim.snapshot()["stock"], stock)
+
+    def test_stock_accepts_catalog_ingredients_absent_from_menu(self):
+        self.tuning["menu"] = {DISH: self.tuning["menu"][DISH]}
+        stock = [{"id": "I7", "kind": "keo_neo", "fresh": 90}]
+        sim = self.make_quan(stock)
+        self.assertEqual(sim.snapshot()["stock"], stock)
+
+    def test_fixture_rejects_wrong_shape_spoiled_items_and_conflicting_reservations(self):
+        stock = [stock_item("I2", 29), stock_item("I3", 60), stock_item("I4", 70, "bong_sung")]
+        for reservations in (
+            [customer(reserved={"ca_loc": 1})],
+            [customer(reserved=["I2"])],
+            [customer(reserved=["I4"])],
+            [customer(reserved=["I9"])],
+            [customer(reserved=["I3", "I3"])],
+            [customer(reserved=["I3"]), customer(id="C2", table_id="T2", reserved=["I3"])],
+            [customer(order_status="unfulfillable", reserved=["I3"])],
+        ):
+            with self.subTest(reservations=reservations), self.assertRaises(BadInput):
+                self.make_quan(stock, customers=reservations)
+        with self.assertRaises(BadInput):
+            self.make_quan({"ca_loc": 1})
+
+    def test_reserved_item_can_reach_threshold_then_spoils_once(self):
+        stock = [stock_item("I1", Fraction(7201, 240))]
+        sim = self.make_quan(stock, customers=[customer(reserved=["I1"])])
+        self.assertEqual(self.play(sim, 1), [])
+        self.assertEqual(sim.snapshot()["stock"][0]["fresh"], 30)
+        self.assertEqual(sim.snapshot()["customers"][0]["reserved"], ["I1"])
+        self.assertEqual(stock[0]["fresh"], Fraction(7201, 240))
+        self.assertEqual(self.play(sim, 2), [
+            (2, "spoiled", {"item_id": "I1", "kind": "ca_loc", "location": "stock"}),
+        ])
+        self.assertLess(sim.snapshot()["stock"][0]["fresh"], 30)
+        self.assertEqual(sim.snapshot()["customers"][0]["order_status"], "unfulfillable")
+        self.assertEqual(sim.snapshot()["customers"][0]["reserved"], [])
+
+    def test_re_reservation_uses_order_priority_before_ready_and_cooking(self):
+        stock = [stock_item("I10", 30), stock_item("I2", 30), stock_item("I11", 50)]
+        sim = self.make_quan(stock, player={"pos": [2, 8]}, customers=[
+            customer(id="C2", table_id="T2", order_tick=1, reserved=["I10"]),
+            customer(order_tick=2, reserved=["I2"]),
+            customer(id="C3", table_id="T3", order_status="assigned"),
+        ], stoves=[{"id": "B2", "state": "cooking", "cook_ticks_left": 1, "dish": cooked_dish("C3")}])
+        events = self.play(sim, 1, [{"tick": 0, "interact": True}])
+        self.assertEqual([name for _, name, _ in events], ["spoiled", "spoiled", "dish_ready", "cook_started"])
+        self.assertEqual([data["item_id"] for _, _, data in events[:2]], ["I2", "I10"])
+        self.assertEqual(events[-1][2]["order_id"], "C2")
+        self.assertEqual(events[-1][2]["items"], [stock_item("I11", float(Fraction(11999, 240)))])
+        self.assertEqual(events[-1][2]["base_price"], 29)
+        snap = sim.snapshot()
+        self.assertEqual(snap["customers"][0]["order_status"], "unfulfillable")
+        self.assertEqual(snap["customers"][0]["reserved"], [])
+        self.assertEqual([item["id"] for item in snap["stock"]], ["I2", "I10"])
+
+    def test_re_reservation_replaces_the_whole_recipe(self):
+        stock = [stock_item("I1", 30), stock_item("I2", 80),
+                 stock_item("I3", 40, "bong_dien_dien"), stock_item("I4", 70, "bong_dien_dien")]
+        sim = self.make_quan(stock, customers=[customer(dish_id="canh_chua_ca_loc", reserved=["I3", "I1"])])
+        self.play(sim, 1)
+        self.assertEqual(set(sim.snapshot()["customers"][0]["reserved"]), {"I2", "I4"})
+
+    def test_new_customer_cannot_use_spoiled_or_held_items_but_can_use_released_stock(self):
+        sim = self.make_quan([stock_item("I1", 28), stock_item("I2", 70)],
+                             customers=[customer(reserved=["I2"], patience_ticks_left=121)],
+                             random_customers=True)
+        events = self.play(sim, 1020)
+        self.assertEqual([(tick, name) for tick, name, _ in events],
+                         [(120, "no_dish"), (121, "customer_left"), (1020, "customer_arrived")])
+        self.assertEqual(sim.snapshot()["customers"][0]["reserved"], ["I2"])
+
+    def test_cooking_consumes_exact_items_in_kind_and_id_order_and_floors_average(self):
+        stock = [
+            stock_item("I10", 70, "ca_linh"), stock_item("I2", 60, "ca_linh"),
+            stock_item("I3", 50, "ca_keo"), stock_item("I4", 80, "keo_neo"),
+            stock_item("I6", 90, "bong_dien_dien"), stock_item("I5", 100, "ca_linh"),
+        ]
+        sim = self.make_quan(stock, player={"pos": [2, 8]}, customers=[
+            customer(dish_id="lau_mam", reserved=["I4", "I10", "I6", "I2", "I3"]),
+        ])
+        events = self.play(sim, 1, [{"tick": 0, "interact": True}])
+        _, name, event = events[0]
+        self.assertEqual(name, "cook_started")
+        self.assertEqual(event["base_price"], 139)
+        self.assertEqual([item["id"] for item in event["items"]], ["I6", "I3", "I2", "I10", "I4"])
+        self.assertEqual([item["id"] for item in sim.snapshot()["stock"]], ["I5"])
+        self.assertEqual(sim.snapshot()["customers"][0]["reserved"], [])
+
+    def test_locked_price_and_tip_are_paid_on_the_closing_tick(self):
+        sim = self.make_quan([stock_item("I1", 80)], player={"pos": [2, 8]},
+                             tables=[{"id": "T1", "pos": [3, 8]}], time_left_ticks=381,
+                             customers=[customer(reserved=["I1"])])
+        events = self.play(sim, 381, [
+            {"tick": 0, "interact": True}, {"tick": 1, "interact": False},
+            {"tick": 360, "interact": True}, {"tick": 361, "move": [1, 0]},
+            {"tick": 379, "interact": False, "move": [0, 0]}, {"tick": 380, "interact": True},
+        ])
+        self.assertEqual([(tick, name) for tick, name, _ in events], [
+            (1, "cook_started"), (361, "dish_ready"), (361, "dish_picked"),
+            (381, "served"), (381, "paid"), (381, "quan_end"),
+        ])
+        self.assertEqual(events[3][2]["base_price"], 47)
+        self.assertEqual(events[3][2]["tip"], 9)
+        self.assertEqual(events[4][2]["amount"], 56)
+        self.assertEqual(events[4][2]["reason"], "closing")
+        self.assertEqual(events[5][2]["earned"], 56)
+        self.assertEqual(events[5][2]["reputation"], 3.2)
