@@ -1,4 +1,4 @@
-"""Buổi tối — Mở Quán theo Test Contract v1.0."""
+"""Buổi tối — Mở Quán, chơi riêng hoặc trong vòng ngày."""
 
 import math
 from decimal import Decimal
@@ -18,10 +18,16 @@ class QuanSim:
     mode = "quan"
     phase = "quan"
 
-    def __init__(self, tuning, scenario, streams, ids, inventory=None):
+    def __init__(self, tuning, scenario, streams, ids, inventory=None, *, day_plan=None, progress=None):
         t = tuning["quan"]
         self.t = t
-        self.menu = tuning["menu"]
+        menu = tuning["menu"]
+        self.ingredient_kinds = {kind for dish in menu.values() for kind in dish["recipe"]}
+        self.menu = menu
+        if day_plan is not None:
+            # Số suất trong kế hoạch chỉ dùng để tính mục tiêu thu gom.
+            planned_dishes = day_plan["dishes"]
+            self.menu = {dish_id: dish for dish_id, dish in menu.items() if dish_id in planned_dishes}
         self.rng = streams
         self.ids = ids
         self.tick_hz = tuning["tick_hz"]
@@ -44,7 +50,14 @@ class QuanSim:
         self.stock = dict(inventory if inventory is not None else scenario.get("stock", {}))
         self.hand = scenario.get("hand")
         self.time_left_ticks = scenario.get("time_left_ticks", self._ticks(t["duration_s"]))
-        self.reputation = scenario.get("reputation", t["reputation_initial"])
+        if progress is None:
+            self.money = 0
+            self.earned = 0
+            self.reputation = scenario.get("reputation", t["reputation_initial"])
+        else:
+            self.money = progress["money"]
+            self.earned = progress["earned"]
+            self.reputation = progress["reputation"]
         if (isinstance(self.reputation, bool) or not isinstance(self.reputation, (int, float))
                 or not t["reputation_min"] <= self.reputation <= t["reputation_max"]):
             raise BadInput("reputation ngoài miền tuning")
@@ -54,8 +67,6 @@ class QuanSim:
         self.tables = self._merge(t["tables"], scenario.get("tables", []), {"id", "pos"})
         self.customers = self._load_customers(scenario.get("customers", []))
         self._validate_dish_locations()
-        self.money = 0
-        self.earned = 0
         self.shift_earned = 0
         self.done = False
         self.reason = None
@@ -108,7 +119,7 @@ class QuanSim:
 
         for customer in sorted(customers, key=self._order_key):
             recipe = self.menu[customer["dish_id"]]["recipe"] if customer["order_status"] == "reserved" else {}
-            reserved = validate_items(customer.get("reserved", recipe))
+            reserved = validate_items(customer.get("reserved", recipe), kinds=self.ingredient_kinds)
             if reserved != recipe or not self._can_reserve(reserved, available):
                 raise BadInput(f"{customer['id']}: nguyên liệu giữ khác công thức hoặc quá tồn")
             customer["reserved"] = reserved
