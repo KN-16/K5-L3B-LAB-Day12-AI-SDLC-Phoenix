@@ -128,10 +128,14 @@ class Day:
         self.sim = self.gather(tuning, scenario, self.streams, self.ids, day=self.number)
 
     def opening_events(self):
-        return [("day_start", {}), ("day_plan", self.plans[self.number]), ("phase_start", {})]
+        return [("day_start", {}), ("day_plan", self.plan), ("phase_start", {})]
+
+    @property
+    def plan(self):
+        return self.plans[(self.number - 1) % len(self.plans) + 1]
 
     def snapshot_fields(self):
-        fields = {"day": self.number, "day_plan": self.plans[self.number],
+        fields = {"day": self.number, "day_plan": self.plan,
                   "upgrades": dict(self.upgrades), "active_upgrades": dict(self.active_upgrades)}
         if self.sim.phase == "gather":
             fields.update(money=self.money, earned=self.earned, reputation=self.reputation)
@@ -150,7 +154,7 @@ class Day:
                                                 if isinstance(item_id, str) else item_id for item_id in reserved]
             self.sim = self.quan(self.tuning, scenario,
                                  self.streams, self.ids, inventory=self.sim.inventory_items(),
-                                 day_plan=self.plans[self.number], progress=progress)
+                                 day_plan=self.plan, progress=progress)
         elif phase == "quan":
             self.sim = Shop(self.tuning["shop"], self.sim, self.upgrades, self.tuning.get("freshness"))
         else:

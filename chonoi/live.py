@@ -253,8 +253,8 @@ class _Handler(BaseHTTPRequestHandler):
 class LiveServer:
     """Máy chủ + mô phỏng. port=0 -> cổng ngẫu nhiên (đọc `.port`)."""
 
-    def __init__(self, game: LiveGame, host="127.0.0.1", port=8000):
-        handler = type("Handler", (_Handler,), {"game": game})
+    def __init__(self, game: LiveGame, host="127.0.0.1", port=8000, *, handler_class=_Handler):
+        handler = type("Handler", (handler_class,), {"game": game})
         self.game = game
         self.httpd = ThreadingHTTPServer((host, port), handler)
         self.httpd.daemon_threads = True

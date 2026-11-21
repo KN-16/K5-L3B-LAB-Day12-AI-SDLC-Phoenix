@@ -23,7 +23,7 @@ cd K5-L3B-LAB-Day12-AI-SDLC-Phoenix
 python3 -m chonoi.live --mode day
 ```
 
-Dùng **WASD hoặc phím mũi tên** để di chuyển. **E** hái rau, cập bến hoặc tương tác với bếp và bàn. **Space** bắt cá khi đang lặn. **P** hoặc **Esc** để tạm dừng. Khi chơi ca độc lập, **R** bắt đầu lại ca.
+Dùng **WASD hoặc phím mũi tên** để di chuyển. **E** hái rau, cập bến hoặc tương tác với bếp và bàn. **Space** bắt cá khi đang lặn. **P** hoặc **Esc** để tạm dừng. **H** hoặc nút **Tương phản cao** đổi chế độ hiển thị. Khi chơi ca độc lập, **R** bắt đầu lại ca.
 
 Bấm **Chơi**, xem mục tiêu nguyên liệu, chơi hai ca rồi dùng tiền trong Shop. Đóng Shop để bắt đầu Ngày tiếp theo hoặc xem tổng kết. Trong quán, theo HUD để xem nguyên liệu khả dụng, đơn gọi, kiên nhẫn, bếp và món đang cầm. Điểm bằng tổng thu (gồm boa) cộng 100 nhân phần nguyên của uy tín. Tiền tính theo nghìn đồng.
 
@@ -34,6 +34,18 @@ Chơi hai ca riêng bằng `mkdir -p tmp && python3 -m chonoi.live --mode gather
 Chạy headless một Ngày với `mkdir -p tmp && python3 -m chonoi.headless --mode day --days 1 --seed 42 --ticks 22200 --out tmp/day.jsonl`.
 
 Game có các chế độ **headless** `gather`, `quan` và `day` theo Test Contract. [Tài liệu khung Python](docs/STARTER.md) và [hợp đồng tích hợp Phase 2](docs/contracts/phase-2.md) mô tả các luồng chạy.
+
+### Đo hiệu năng và chạy soak
+
+Benchmark dùng Chrome, Chromium hoặc Edge đã cài. Nếu chương trình nằm ngoài đường dẫn mặc định, đặt `CHONOI_BROWSER` thành đường dẫn file chạy. Benchmark dùng Canvas 1280×720, làm nóng 3 giây rồi đo theo thời lượng đã nhập.
+
+```bash
+mkdir -p tmp
+python3 -m chonoi.bench --seed 42 --duration 30 --out tmp/bench.json
+python3 -m chonoi.soak --seed 7 --days 10 --out tmp/soak.json
+```
+
+Trên Windows, dùng Python trong `.venv` cho các lệnh tương ứng. Khi tải gói Release, giải nén, mở terminal ở thư mục chứa `game.contract.json` rồi chạy `python3 -m chonoi.live --mode day`.
 
 ## Tự do sáng tạo
 

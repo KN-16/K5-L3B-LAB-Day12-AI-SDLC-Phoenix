@@ -12,8 +12,10 @@
 - Phase 3, Khôi chuẩn bị cặp fixture kho v1.1/v1.2 trước khi sửa adapter. Diên và Nhân dùng cùng fixture để kiểm bàn giao từ Gather sang Quán. Khôi kiểm cả lỗi nhận schema cũ và smoke kho mới trước khi gắn tag.
 
 ## Phase 4 (cuối)
-- Rà lại hành động Phase 2: đã làm chưa? vì sao?
-- Điều tốt / điều tệ:
-- Số liệu: số commit theo người, cách đọc code của nhau, token theo người:
-- Một lần AI sai và cách nhóm phát hiện:
-- Nếu làm lại, đổi gì:
+
+- Hành động Phase 2 đã được thực hiện. Nhóm lập ADR cùng hai fixture kho, kiểm CLI v1.2 trả mã 2 với kho đếm và so file kho mới với snapshot Quán.
+- Hai PR đầu Phase 3 giữ v1.1, giúp gộp adapter và Quán riêng. Bản tích hợp vẫn cần bổ sung phần Gather để kiểm schema mới từ đầu đến cuối.
+- Diên gửi file kho Gather để Nhân kiểm bếp. Nhân bàn giao test Quán để Khôi chạy hồi quy tích hợp. Hai bạn ghi lại việc phối hợp trong phản tư cá nhân. [Diên](members/dinhphucdien179.md) · [Nhân](members/ying684.md)
+- Qua tag `phase-3`, Khôi có 8, Diên 6 và Nhân 3 commit nội dung. Ma trận kiểm chứng dẫn các commit đại diện. Token và chi phí chưa đo.
+- Một lỗi của bản HUD do AI hỗ trợ là hiện `NaN:NaN` khi snapshot thiếu bộ đếm kiên nhẫn. Kiểm diff rồi dựng fixture thiếu giá trị để tái hiện. Sau sửa, chạy lại năm ca trạng thái khách.
+- Khôi giữ smoke bàn giao bằng CLI thật ngay cạnh test từng module và kiểm gói Release từ thư mục mới giải nén trước khi đăng GitHub.

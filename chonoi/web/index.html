@@ -19,6 +19,10 @@
   button { padding: .5rem .8rem; font: inherit; color: #203632; background: #f9df9d; border-radius: .35rem; cursor: pointer; }
   button:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
   button:disabled { opacity: .55; cursor: initial; }
+  #contrast-switch { position: fixed; right: .8rem; bottom: 1.9rem; z-index: 2; font-size: 15px; }
+  .high-contrast canvas { filter: contrast(1.4); }
+  .high-contrast #panel { background: #090909; color: white; border: 2px solid #ffea4e; }
+  .high-contrast button { color: #161616; background: #ffea4e; border: 2px solid #161616; }
 </style>
 </head>
 <body>
@@ -30,6 +34,7 @@
     <div id="actions"></div>
   </section>
 </div>
+<button type="button" id="contrast-switch" aria-pressed="false">Tương phản cao</button>
 <script>
 "use strict";
 /*
@@ -45,6 +50,22 @@ const title = document.getElementById("screen-title");
 const detail = document.getElementById("screen-detail");
 const actions = document.getElementById("actions");
 let visiblePanel = null, introTimer;
+const contrastSwitch = document.getElementById("contrast-switch");
+const bench = window.chonoiBench;
+let highContrast = false;
+try { highContrast = !bench && localStorage.getItem("chonoi-high-contrast") === "on"; } catch (_) {}
+function updateContrast() {
+  document.body.classList.toggle("high-contrast", highContrast);
+  contrastSwitch.setAttribute("aria-pressed", String(highContrast));
+}
+function toggleContrast() {
+  highContrast = !highContrast;
+  updateContrast();
+  try { localStorage.setItem("chonoi-high-contrast", highContrast ? "on" : "off"); } catch (_) {}
+}
+contrastSwitch.hidden = Boolean(bench);
+contrastSwitch.addEventListener("click", toggleContrast);
+updateContrast();
 
 // ---------- vào: phím ----------
 const down = new Set();
@@ -92,6 +113,10 @@ function keyName(e) { return e.key.length === 1 ? e.key.toLowerCase() : e.key.to
 addEventListener("keydown", (e) => {
   const k = keyName(e);
   if (e.repeat) { if (k === " " || k.startsWith("arrow")) e.preventDefault(); return; }
+  if (k === "h" && !bench) {
+    toggleContrast();
+    return;
+  }
   if (snap?.screen) {
     if (snap.screen === "day_intro" && e.target?.tagName !== "BUTTON") changeScreen("day_intro");
     return;
@@ -268,8 +293,12 @@ function freshnessLabel(items) {
 }
 
 function fit() {
-  const dpr = window.devicePixelRatio || 1;
-  const w = innerWidth, h = innerHeight;
+  const dpr = bench ? 1 : (window.devicePixelRatio || 1);
+  const w = bench ? bench.width : innerWidth, h = bench ? bench.height : innerHeight;
+  if (bench && !cv.style.width) {
+    cv.style.width = w + "px";
+    cv.style.height = h + "px";
+  }
   if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return [w, h];
@@ -281,6 +310,17 @@ function text(s, x, y, o = {}) {
   ctx.textBaseline = o.base || "alphabetic";
   if (o.maxWidth) ctx.fillText(s, x, y, o.maxWidth);
   else ctx.fillText(s, x, y);
+}
+
+function warning(label, w, y) {
+  if (highContrast) {
+    ctx.font = "18px system-ui, sans-serif";
+    const width = Math.min(ctx.measureText(label).width + 20, w - 20);
+    ctx.fillStyle = "#ffea4e";
+    ctx.fillRect(w - width - 10, y - 20, width, 26);
+  }
+  text(label, w - 18, y, {size: 18, color: highContrast ? "#080808" : "#ffb5c3",
+    align: "right", maxWidth: w - 36});
 }
 function bar(x, y, w, h, frac, color, label, labelSize = 11) {
   ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(x, y, w, h);
@@ -405,8 +445,10 @@ function drawGather(w, h) {
       (snap.nodes || []).some((n) => n.ready && near(n.pos, meta.interact_radius)) ? "E · Hái rau" : "";
     if (hint) text(hint, 14, 100, { size: 18 });
   }
-  const alerts = [nearbyMonster && "Thủy quái!", phase2 && p?.oxygen_ticks === 0 && "Hết hơi!"].filter(Boolean);
-  if (alerts.length) text(alerts.join(" · "), w - 14, 100, { align: "right", color: "#ffb5c3", size: 18 });
+  const oxygenAlert = phase2 && p?.oxygen_ticks <= p?.oxygen_max_ticks * 0.25 &&
+    (p.oxygen_ticks === 0 ? "Hết hơi!" : "Oxy sắp hết!");
+  const alerts = [nearbyMonster && "Thủy quái!", oxygenAlert].filter(Boolean);
+  if (alerts.length) warning(alerts.join(" · "), w, 100);
   if (nearbyMonster) {
     ctx.strokeStyle = "#b982e4"; ctx.lineWidth = 4; ctx.strokeRect(2, 2, w - 4, h - 4);
   }
@@ -433,7 +475,7 @@ function drawQuan(w, h) {
   const meta = snap.meta || {};
   const b = meta.bounds || { x: [0, 16], z: [0, 10] };
   const phase2 = snap.supports_pause;
-  const X = b.x[1], Z = b.z[1], top = phase2 ? 116 : 108, bottom = 40;
+  const X = b.x[1], Z = b.z[1], top = phase2 ? 140 : 108, bottom = 40;
   const s = Math.max(1, Math.min((w - 40) / X, (h - top - bottom) / Z));
   const ox = (w - s * X) / 2, oy = top;
   const sx = (x) => ox + x * s, sy = (z) => oy + (Z - z) * s;
@@ -502,7 +544,29 @@ function drawQuan(w, h) {
     return order + " · đang chờ";
   }).join(", ");
   text("Đơn gọi: " + (orders || "chưa có"), 14, 92, { size: phase2 ? 18 : 14, maxWidth: w - 28 });
+  const impatient = (snap.customers || []).filter(c => c.state === "waiting" && c.patience_ticks_left < patMax * 0.25);
+  if (impatient.length) warning("Khách sắp giận · " + impatient.map(c => c.table_id).join(", "), w, 122);
   text("WASD/mũi tên đi · E tương tác (bếp / bàn) · R chơi lại", w - 10, h - 14, { size: 12, align: "right", color: "#9fb3c0" });
+}
+
+let firstBenchFrame, lastBenchFrame, measuredBenchTime = 0, benchSent = false;
+const benchIntervals = [];
+function measureBenchFrame() {
+  const now = performance.now();
+  if (firstBenchFrame === undefined) firstBenchFrame = now;
+  if (benchSent || now < firstBenchFrame + bench.warmup_ms) return;
+  if (lastBenchFrame !== undefined && now > lastBenchFrame) {
+    const interval = now - lastBenchFrame;
+    benchIntervals.push(interval);
+    measuredBenchTime += interval;
+  }
+  lastBenchFrame = now;
+  if (measuredBenchTime < bench.duration_ms) return;
+  benchSent = true;
+  fetch("/bench-result", {method: "POST", body: JSON.stringify({
+    intervals: benchIntervals, width: cv.width, height: cv.height,
+    load_ms: performance.timeOrigin + firstBenchFrame - bench.started_ms,
+  })});
 }
 
 function frame() {
@@ -515,6 +579,7 @@ function frame() {
     updatePanel();
     eventLog(w, h);
     if (snap.mode !== "day" || snap.error) overlay(w, h);
+    if (bench && snap.phase === "gather" && !snap.error) measureBenchFrame();
   } else {
     text(offline ? "Không kết nối được máy chủ…" : "Đang tải…", w / 2, h / 2, { align: "center", size: 18 });
   }

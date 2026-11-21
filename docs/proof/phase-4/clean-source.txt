@@ -1,0 +1,4 @@
+PASS | clean source from Phase 4 index | excludes .git, .venv, tmp, .env
+PASS | Windows, .venv Python | python -m chonoi.live --mode day (ephemeral port)
+PASS | GET / serves Canvas and high contrast; GET /state reports day mode
+Pending after tag: verify the release ZIP and macOS/Linux startup

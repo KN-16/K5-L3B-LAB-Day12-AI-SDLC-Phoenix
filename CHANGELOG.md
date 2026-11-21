@@ -1,5 +1,11 @@
 # Changelog
 
+## Phase 4 · Test Contract v1.3 · Release v1.0.0
+
+- Thêm chế độ tương phản cao và nhãn cảnh báo thủy quái, oxy sắp hết và khách sắp giận.
+- Khai benchmark Canvas 1280×720 và soak headless nhiều Ngày. Soak dùng chung Session và lặp kế hoạch D1–D5.
+- Chuẩn bị gói Release chạy bằng Python 3.12 trở lên và trình duyệt. Gameplay, tuning và kho cá thể theo v1.2.
+
 ## Phase 3 · Test Contract v1.2
 
 - Theo dõi từng nguyên liệu bằng ID và độ tươi. Gather và Quán hao tươi theo nhịp riêng. Quán giữ hàng theo ID, cấp lại khi ươn và chốt giá theo độ tươi lúc nấu.

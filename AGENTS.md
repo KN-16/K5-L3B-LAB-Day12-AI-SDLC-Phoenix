@@ -32,4 +32,5 @@
 - Sáng tạo thêm được khuyến khích nhưng phải tắt ở headless (xem README, mục "Tự do sáng tạo").
 
 ## Skills / hooks của nhóm
-- (Ghi tên và khi nào dùng; tối thiểu 2 skill/hook/command nhóm tự viết, đặt ở `.agents/skills/` hoặc tương đương.)
+- Kiểm đổi schema hoặc bàn giao kho bằng `PYTHONPATH=tests:. python3 -m unittest discover -s tests -p 'test_inventory_v12.py' -v`.
+- Kiểm bản phát hành bằng `python3 -m chonoi.soak --seed 7 --days 10 --out tmp/soak.json` và `python3 -m chonoi.bench --seed 42 --duration 30 --out tmp/bench.json`. Tạo thư mục `tmp/` trước khi chạy.

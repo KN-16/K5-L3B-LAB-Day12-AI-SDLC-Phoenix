@@ -7,3 +7,4 @@
 | 3 | 21/11/2026 | Phase 2 bàn giao kho và trạng thái xuyên Ngày thế nào? | Runner giữ tiến trình và trao kho đếm trong bộ nhớ khi chạy `day`. Hai CLI độc lập tiếp tục dùng file kho. Đã kiểm cả hai cách. | Khôi review bản tích hợp |
 | 4 | 21/11/2026 | Khi nào bật contract v1.1? | Bật ở PR cuối của Khôi trên nền `b2719e6`, sau khi Gather và Quán đã gộp. Giữ các điều chỉnh tích hợp trong phạm vi Test Contract. | Khôi review bản tích hợp |
 | 5 | 21/11/2026 | Phase 3 đưa schema kho cá thể vào main theo thứ tự nào? | PR #7 gộp adapter của Diên, PR #8 gộp Quán của Nhân. PR cuối nối adapter vào Gather, CLI và vòng ngày, rồi bật v1.2. | Thứ tự do Khôi xác nhận, bản tích hợp chờ review |
+| 6 | 21/11/2026 | Phase 4 chia vai thế nào? | Khôi phụ trách triển khai, QA và Release. Mỗi thành viên tự viết và xác nhận phản tư dựa trên phần mình làm. | Khôi |
