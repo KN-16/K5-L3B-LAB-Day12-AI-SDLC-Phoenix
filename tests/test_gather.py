@@ -26,6 +26,24 @@ REFILL = G["oxygen_refill_per_tick"]
 CHOKE = G["choke_interval_ticks"]
 HP = G["hp_max"]
 UNDER = [20, 10]  # dưới nước, ngoài bến, quanh đó không có nút/đàn
+R_INTERACT = G["interact_radius"]
+R_CATCH = G["catch_radius"]
+CAP = G["hold_capacity"]
+NODE_YIELD = G["node_yield"]
+FISH_YIELD = G["fish_yield"]
+REGROW = int(round(G["regrow_s"] * TICK))
+CATCH_CD = int(round(G["catch_cooldown_s"] * TICK))
+TIE = 0.5  # độ lệch biểu diễn chính xác, nằm trong mọi bán kính hợp lệ (0.5–5 m) -> hòa khoảng cách thật
+PRESS_E = [{"tick": 0, "interact": True}]
+PRESS_SPACE = [{"tick": 0, "catch": True}]
+
+
+def node(nid, x, kind="bong_sung", regrow=0):
+    return {"id": nid, "kind": kind, "pos": [x, 0], "regrow_ticks": regrow}
+
+
+def school(fid, pos, kind="ca_linh"):
+    return {"id": fid, "kind": kind, "pos": pos}
 
 
 def ev(rows, name):
@@ -119,6 +137,103 @@ class SwimOxygenChoke(GatherCase):
         rows = self.play({"player": {"pos": [20, d0], "vel": [0, SPEED], "oxygen_ticks": 1}},
                          [{"tick": 0, "move": [0, 1]}], ticks=1)
         self.assertEqual([r["name"] for r in events(rows) if r["tick"] == 1], ["dive", "oxygen_empty"])
+
+
+class GatherCatch(GatherCase):
+    """AC-P1-02 (hái, bắt) và giỏ của AC-P1-01: chọn ứng viên, lấy đủ hoặc giữ nguyên, mọc lại, hồi chiêu."""
+
+    def test_prd_example_gathers_node_at_interact_radius_edge(self):
+        """Scenario mẫu mục D (nút đúng mép bán kính hái) và dòng event mẫu mục E."""
+        block = {"player": {"pos": [20, 0], "heading_deg": 0}, "hold": ["ca_loc", "bong_sung"],
+                 "nodes": [{"id": "N1", "kind": "bong_dien_dien", "pos": [20 + R_INTERACT, 0]}], "time_left_ticks": 120}
+        rows = self.play(block, PRESS_E, ticks=1)
+        self.assertEqual(events(rows, "gather"), [{"type": "event", "tick": 1, "phase": "gather", "name": "gather",
+                                                    "data": {"node_id": "N1", "kind": "bong_dien_dien",
+                                                             "amount": NODE_YIELD}}])
+        s = at(rows)[1]
+        self.assertEqual(s["hold"], ["ca_loc", "bong_sung"] + ["bong_dien_dien"] * NODE_YIELD)
+        self.assertEqual(s["hold_count"], 2 + NODE_YIELD)
+        self.assertEqual([(n["id"], n["ready"], n["regrow_ticks"]) for n in s["nodes"]], [("N1", False, REGROW)])
+
+    def test_gather_tie_on_distance_prefers_smaller_numeric_id(self):
+        block = {"player": {"pos": [20, 0]}, "nodes": [node("N10", 20 + TIE), node("N2", 20 - TIE)]}
+        rows = self.play(block, PRESS_E, ticks=1)
+        self.assertEqual([d["node_id"] for _, d in ev(rows, "gather")], ["N2"])
+
+    def test_gather_skips_node_not_ready(self):
+        block = {"player": {"pos": [20, 0]}, "nodes": [node("N1", 20 + TIE / 2, regrow=50), node("N2", 20 + TIE)]}
+        rows = self.play(block, PRESS_E, ticks=1)
+        self.assertEqual([d["node_id"] for _, d in ev(rows, "gather")], ["N2"])
+
+    def test_node_regrown_after_regrow_ticks_and_gatherable_in_same_step(self):
+        """Mục F: nút từ 1 về 0 phát node_regrown và hái được ngay trong bước đó."""
+        inputs = [{"tick": 0, "interact": True}, {"tick": 1, "interact": False}, {"tick": REGROW, "interact": True}]
+        rows = self.play({"player": {"pos": [20, 0]}, "nodes": [node("N1", 20)]}, inputs,
+                         ticks=REGROW + 1, every=REGROW + 1)
+        self.assertEqual([t for t, _ in ev(rows, "gather")], [1, REGROW + 1])
+        self.assertEqual(ev(rows, "node_regrown"), [(REGROW + 1, {"node_id": "N1"})])
+        self.assertEqual([r["name"] for r in events(rows) if r["tick"] == REGROW + 1], ["node_regrown", "gather"])
+
+    def test_interact_gathers_nothing_underwater_or_out_of_range(self):
+        cases = {"mặt nước, nút ngoài tầm": [20 + R_INTERACT + 1, 0]}
+        if R_INTERACT > SD:
+            cases["dưới nước, nút trong tầm"] = [20, (SD + R_INTERACT) / 2]
+        for label, pos in cases.items():
+            rows = self.play({"player": {"pos": pos}, "nodes": [node("N1", 20)]}, PRESS_E, ticks=1)
+            self.assertEqual(ev(rows, "gather") + ev(rows, "hold_full"), [], label)
+            self.assertEqual(at(rows)[1]["hold"], [], label)
+
+    def test_gather_hold_full_keeps_node_ready(self):
+        block = {"player": {"pos": [20, 0]}, "hold": ["ca_loc"] * CAP, "nodes": [node("N1", 20)]}
+        rows = self.play(block, PRESS_E, ticks=1)
+        self.assertEqual(ev(rows, "hold_full"),
+                         [(1, {"action": "gather", "node_id": "N1", "required": NODE_YIELD, "free": 0})])
+        self.assertEqual(ev(rows, "gather"), [])
+        s = at(rows)[1]
+        self.assertEqual((s["hold_count"], s["nodes"][0]["ready"], s["nodes"][0]["regrow_ticks"]), (CAP, True, 0))
+
+    def test_catch_at_radius_edge_takes_whole_yield_removes_school_sets_cooldown(self):
+        rows = self.play({"player": {"pos": [30, 10 + R_CATCH]}, "fish": [school("F1", [30, 10])]}, PRESS_SPACE, ticks=1)
+        y = FISH_YIELD["ca_linh"]
+        self.assertEqual(ev(rows, "fish_caught"), [(1, {"fish_id": "F1", "kind": "ca_linh", "yield": y})])
+        s = at(rows)[1]
+        self.assertEqual((s["hold"], s["fish"], s["player"]["catch_cd_ticks"]), (["ca_linh"] * y, [], CATCH_CD))
+
+    @unittest.skipIf(CATCH_CD < 3, "cần hồi chiêu >= 3 tick để dựng frame bấm lại")
+    def test_catch_cooldown_set_at_t_reusable_from_t_plus_L(self):
+        block = {"player": {"pos": [30, 12]}, "fish": [school("F1", [30, 12 - TIE]), school("F2", [30, 12 + 2 * TIE], "ca_loc")]}
+        for press, caught in ((CATCH_CD - 1, ["F1"]), (CATCH_CD, ["F1", "F2"])):
+            inputs = [{"tick": 0, "catch": True}, {"tick": 1, "catch": False}, {"tick": press, "catch": True}]
+            rows = self.play(block, inputs, ticks=press + 1, every=press + 1)
+            self.assertEqual([d["fish_id"] for _, d in ev(rows, "fish_caught")], caught, press)
+
+    def test_catch_does_nothing_at_surface_or_without_school_in_range(self):
+        cases = {"mặt nước, đàn trong tầm": ([30, 0], [30, 1]),
+                 "dưới nước, không đàn trong tầm": ([30, 10], [30, 10 + R_CATCH + 1])}
+        for label, (pos, fish_pos) in cases.items():
+            rows = self.play({"player": {"pos": pos}, "fish": [school("F1", fish_pos)]}, PRESS_SPACE, ticks=1)
+            self.assertEqual(ev(rows, "fish_caught") + ev(rows, "hold_full"), [], label)
+            s = at(rows)[1]
+            self.assertEqual((s["player"]["catch_cd_ticks"], [f["id"] for f in s["fish"]]), (0, ["F1"]), label)
+
+    def test_catch_hold_full_keeps_school_and_cooldown_without_trying_other_school(self):
+        y_linh, y_loc = FISH_YIELD["ca_linh"], FISH_YIELD["ca_loc"]
+        free = y_linh - 1  # thiếu chỗ cho đàn linh gần nhất, nhưng đủ cho đàn lóc xa hơn
+        self.assertLessEqual(y_loc, free, "fixture cần đàn xa hơn vừa chỗ để chứng minh không thử đàn khác")
+        block = {"player": {"pos": [30, 12]}, "hold": ["bong_sung"] * (CAP - free),
+                 "fish": [school("F1", [30, 12 - TIE]), school("F2", [30, 12 + 2 * TIE], "ca_loc")]}
+        rows = self.play(block, PRESS_SPACE, ticks=1)
+        self.assertEqual(ev(rows, "hold_full"),
+                         [(1, {"action": "catch", "fish_id": "F1", "required": y_linh, "free": free})])
+        self.assertEqual(ev(rows, "fish_caught"), [])
+        s = at(rows)[1]
+        self.assertEqual(([f["id"] for f in s["fish"]], s["player"]["catch_cd_ticks"], s["hold_count"]),
+                         (["F1", "F2"], 0, CAP - free))
+
+    def test_catch_tie_on_distance_prefers_smaller_numeric_id(self):
+        block = {"player": {"pos": [30, 12]}, "fish": [school("F10", [30, 12 + TIE]), school("F2", [30, 12 - TIE])]}
+        rows = self.play(block, PRESS_SPACE, ticks=1)
+        self.assertEqual([d["fish_id"] for _, d in ev(rows, "fish_caught")], ["F2"])
 
 
 if __name__ == "__main__":
