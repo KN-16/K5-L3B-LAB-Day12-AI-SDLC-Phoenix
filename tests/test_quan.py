@@ -1,10 +1,16 @@
+import json
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from chonoi.contract import load_contract
+from chonoi.errors import BadInput
+from chonoi.ids import IdAllocator
 from chonoi.inputs import InputPlayer
+from chonoi.rng import Streams
 from chonoi.runner import Session
+from chonoi.sim.quan import QuanSim
 from helpers import ROOT, Workdir, write_json
 
 DISH = "ca_loc_nuong_trui"
@@ -21,6 +27,10 @@ def cooked_dish(order_id="C1", base_price=60):
 class QuanTests(unittest.TestCase):
     def setUp(self):
         self.tuning = load_contract()["tuning"]
+        # The Phase 1 fixtures arrange extra tables explicitly.
+        quan = self.tuning["quan"]
+        quan["stoves"] = [stove for stove in quan["stoves"] if stove["id"] == "B1"]
+        quan["tables"] = [table for table in quan["tables"] if table["id"] == "T1"]
 
     def play(self, scenario, ticks, frames=(), inventory=None):
         session = Session("quan", self.tuning, scenario, seed=42, inventory=inventory)
@@ -251,3 +261,124 @@ class QuanTests(unittest.TestCase):
                 self.assertEqual(snapshots[-1]["stock"], {})
                 self.assertIsNone(snapshots[-1]["hand"])
                 self.assertEqual(snapshots[-1]["stoves"][0]["state"], "idle")
+
+
+class QuanPhase2Tests(unittest.TestCase):
+    def setUp(self):
+        self.tuning = load_contract()["tuning"]
+        delta_path = Path(ROOT) / "docs" / "contracts" / "phase-2.tuning.json"
+        delta = json.loads(delta_path.read_text(encoding="utf-8"))["tuning"]
+        self.tuning["quan"].update(delta["quan"])
+        self.tuning["menu"].update(delta["menu"])
+        self.plans = delta["day_plan"]
+
+    def make_quan(self, scenario, **kwargs):
+        return QuanSim(self.tuning, scenario, Streams(42), IdAllocator(), **kwargs)
+
+    @staticmethod
+    def play(sim, ticks, frames=()):
+        inputs = InputPlayer(frames)
+        events = []
+        for tick in range(ticks):
+            events.extend((tick + 1, name, data) for name, data in sim.step(inputs.advance(tick)))
+            if sim.done:
+                break
+        return events
+
+    def test_standalone_uses_expanded_layout_and_all_recipes(self):
+        for expected_dish, stock in (
+            ("ca_keo_nuong", {"ca_keo": 2}),
+            ("lau_mam", {"ca_linh": 2, "ca_keo": 1, "keo_neo": 1, "bong_dien_dien": 1}),
+        ):
+            with self.subTest(dish=expected_dish):
+                sim = self.make_quan({}, inventory=stock)
+                self.assertEqual([stove["id"] for stove in sim.snapshot()["stoves"]], ["B1", "B2"])
+                self.assertEqual([table["id"] for table in sim.snapshot()["tables"]], ["T1", "T2", "T3", "T4"])
+                self.assertEqual(self.play(sim, 120), [
+                    (120, "customer_arrived", {"order_id": "C1", "table_id": "T1", "dish_id": expected_dish}),
+                ])
+                self.assertEqual(sim.snapshot()["stock"], stock)
+                self.assertEqual(sim.snapshot()["customers"][0]["reserved"], stock)
+
+        # Canh chua and grilled ca loc share an ingredient. Exercise the explicit recipe.
+        sim = self.make_quan({"player": {"pos": [5, 8]}, "customers": [
+            customer(table_id="T4", dish_id="canh_chua_ca_loc"),
+        ]}, inventory={"ca_loc": 1, "bong_dien_dien": 1})
+        self.assertEqual(self.play(sim, 1, [{"tick": 0, "interact": True}]), [
+            (1, "cook_started", {"stove_id": "B2", "order_id": "C1", "dish_id": "canh_chua_ca_loc",
+                                 "items": ["bong_dien_dien", "ca_loc"], "base_price": 90}),
+        ])
+
+    def test_day_plan_filters_before_reserving_at_smallest_free_table(self):
+        sim = self.make_quan({"customers": [customer(id="C7", table_id="T2")]},
+                             inventory={"ca_loc": 2, "ca_keo": 2}, day_plan=self.plans[0])
+        self.assertEqual(self.play(sim, 120), [
+            (120, "customer_arrived", {"order_id": "C8", "table_id": "T1", "dish_id": DISH}),
+        ])
+        self.assertEqual([row["customer_id"] for row in sim.snapshot()["tables"]], ["C8", "C7", None, None])
+
+    def test_day_reports_no_dish_when_planned_recipe_is_reserved(self):
+        sim = self.make_quan({"customers": [customer(dish_id="goi_bong_sung")]},
+                             inventory={"bong_sung": 2, "ca_loc": 1}, day_plan=self.plans[2])
+        self.assertEqual(self.play(sim, 120), [(120, "no_dish", {})])
+        self.assertEqual(sim.snapshot()["stock"], {"bong_sung": 2, "ca_loc": 1})
+
+    def test_day_plan_quantity_does_not_cap_orders_after_payment(self):
+        sim = self.make_quan({
+            "player": {"pos": [2, 8]},
+            "tables": [{"id": "T1", "pos": [3, 8]}],
+        }, inventory={"ca_loc": 3}, day_plan={"dishes": {DISH: 1}, "ingredients": {"ca_loc": 1}})
+        events = self.play(sim, 1920, [
+            {"tick": 120, "interact": True}, {"tick": 121, "interact": False},
+            {"tick": 480, "interact": True}, {"tick": 481, "move": [1, 0]},
+            {"tick": 499, "interact": False, "move": [0, 0]}, {"tick": 500, "interact": True},
+        ])
+        self.assertIn((1101, "paid"), [(tick, name) for tick, name, _ in events])
+        self.assertEqual([(tick, data["dish_id"]) for tick, name, data in events if name == "customer_arrived"],
+                         [(120, DISH), (1020, DISH), (1920, DISH)])
+
+    def test_day_fixtures_use_actual_stock_and_plan(self):
+        for plan, inventory in (
+            (self.plans[0], {"ca_keo": 2}),
+            (self.plans[2], {"ca_keo": 1}),
+        ):
+            with self.subTest(plan=plan, inventory=inventory), self.assertRaises(BadInput):
+                self.make_quan({"customers": [customer(dish_id="ca_keo_nuong")]},
+                               inventory=inventory, day_plan=plan)
+
+    def test_two_stoves_take_oldest_orders_tied_by_table_id(self):
+        sim = self.make_quan({
+            "player": {"pos": [3.5, 8]},
+            "customers": [
+                customer(id="C90", table_id="T1", order_tick=2),
+                customer(id="C9", table_id="T2", order_tick=1),
+                customer(id="C2", table_id="T3", order_tick=1),
+            ],
+        }, inventory={"ca_loc": 3})
+        events = self.play(sim, 25, [
+            {"tick": 0, "interact": True},
+            {"tick": 1, "interact": False, "move": [1, 0]},
+            {"tick": 24, "interact": True, "move": [0, 0]},
+        ])
+        self.assertEqual([(tick, name, data["stove_id"], data["order_id"]) for tick, name, data in events],
+                         [(1, "cook_started", "B1", "C9"), (25, "cook_started", "B2", "C2")])
+        self.assertEqual(sim.snapshot()["stock"], {"ca_loc": 1})
+
+    def test_closing_returns_total_progress_and_unconsumed_stock(self):
+        progress = {"money": 10, "earned": 210, "reputation": 2.1}
+        plan = {"dishes": {DISH: 1, "ca_keo_nuong": 1}, "ingredients": {"ca_loc": 1, "ca_keo": 2}}
+        sim = self.make_quan({
+            "time_left_ticks": 1,
+            "customers": [
+                customer(id="C2", table_id="T2", dish_id="ca_keo_nuong"),
+                customer(state="eating", order_status="served", eat_ticks_left=3, base_price=60, tip=12),
+            ],
+        }, inventory={"ca_keo": 2}, day_plan=plan, progress=progress)
+        self.assertEqual((sim.money, sim.earned, sim.reputation, sim.shift_earned), (10, 210, 2.1, 0))
+        events = self.play(sim, 1)
+        self.assertEqual([name for _, name, _ in events], ["paid", "customer_left", "quan_end"])
+        self.assertEqual(events[-1][2], {
+            "reason": "time", "money": 82, "earned": 282, "shift_earned": 72, "reputation": 2.3,
+        })
+        self.assertEqual(sim.snapshot()["stock"], {"ca_keo": 2})
+        self.assertEqual(sim.snapshot()["customers"], [])
