@@ -29,6 +29,10 @@ Khi gather kết thúc và ghi `kho.json`, dừng tiến trình bằng Ctrl+C r�
 
 Chạy bộ test bằng `PYTHONPATH=tests:. python3 -m unittest discover -s tests -v`.
 
+Khi manifest khai Test Contract **1.1**, chạy `python3 -m chonoi.live --mode day` để chơi trọn vòng ngày trên trình duyệt. Bấm **Chơi**, xem mục tiêu nguyên liệu, chơi hai ca rồi dùng tiền trong Shop. Bấm **P** hoặc **Esc** để tạm dừng. Đóng Shop để bắt đầu Ngày tiếp theo hoặc xem tổng kết.
+
+Chạy headless một Ngày với `python3 -m chonoi.headless --mode day --days 1 --seed 42 --ticks 22200 --out day.jsonl`.
+
 Game cần chế độ **headless** theo Test Contract (`python3 -m chonoi.headless --mode gather|quan …`) để được chạy và chấm tự động. **Công nghệ không ràng buộc**: khung Python trong `chonoi/` chỉ là gợi ý, chi tiết ở [`docs/STARTER.md`](docs/STARTER.md).
 
 ## Tự do sáng tạo
