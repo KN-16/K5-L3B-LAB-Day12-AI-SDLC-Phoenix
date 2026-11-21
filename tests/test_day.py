@@ -12,7 +12,7 @@ from chonoi.inputs import BUTTONS_V11, InputPlayer
 from chonoi.live import LiveGame
 from chonoi.runner import Session, run
 from chonoi.scenario import load_scenario
-from helpers import ROOT, Workdir, read_jsonl, run_headless, write_json
+from helpers import ROOT, Workdir, ingredient_fixture, read_jsonl, run_headless, stock_counts, write_json
 
 
 def phase2_contract():
@@ -20,6 +20,7 @@ def phase2_contract():
     with (root / "docs/contracts/phase-2.tuning.json").open(encoding="utf-8") as file:
         delta = json.load(file)
     contract = load_contract()
+    contract["tuning"].pop("freshness", None)
     for key, values in delta["tuning"].items():
         if isinstance(values, dict):
             contract["tuning"][key] = {**contract["tuning"].get(key, {}), **values}
@@ -189,7 +190,7 @@ class TestIntegratedDay(unittest.TestCase):
         with Workdir() as work:
             scenario = write_json(work.path("day.json"), {
                 "day": {"money": 450, "earned": 450},
-                "gather": {"hold": ["ca_loc", "ca_keo", "keo_neo"], "time_left_ticks": 1},
+                "gather": {"hold": ingredient_fixture(["ca_loc", "ca_keo", "keo_neo"]), "time_left_ticks": 1},
                 "quan": {"time_left_ticks": 2, "random_customers": False},
             })
             inputs = write_json(work.path("inputs.json"), {"frames": [
@@ -208,7 +209,7 @@ class TestIntegratedDay(unittest.TestCase):
             self.assertEqual(code, 0, err)
             rows = read_jsonl(output)
         snapshots = {row["tick"]: row for row in rows if row["type"] == "snapshot"}
-        self.assertEqual(snapshots[1]["stock"], {"ca_loc": 1, "ca_keo": 1, "keo_neo": 1})
+        self.assertEqual(stock_counts(snapshots[1]["stock"]), {"ca_loc": 1, "ca_keo": 1, "keo_neo": 1})
         self.assertEqual((snapshots[4]["state"], snapshots[4]["sim_tick"]), ("paused", 3))
         self.assertEqual((snapshots[6]["day"], snapshots[6]["player"]["oxygen_max_ticks"]), (2, 2700))
         self.assertEqual(snapshots[10]["player"]["hp"], 4)

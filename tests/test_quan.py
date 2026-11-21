@@ -12,7 +12,7 @@ from chonoi.inputs import InputPlayer
 from chonoi.rng import Streams
 from chonoi.runner import Session
 from chonoi.sim.quan import QuanSim
-from helpers import ROOT, Workdir, write_json
+from helpers import ROOT, Workdir, ingredient_fixture, item_schema_enabled, write_json
 
 DISH = "ca_loc_nuong_trui"
 
@@ -77,9 +77,11 @@ class QuanTests(unittest.TestCase):
         self.assertIsNone(snapshots[-1]["tables"][1]["customer_id"])
 
     def test_fixture_conflicts_exit_2_before_opening_output(self):
+        stock = ingredient_fixture(["ca_loc", "ca_loc"]) if item_schema_enabled() else {"ca_loc": 2}
+        reserved = ["I1", "I2"] if item_schema_enabled() else {"ca_loc": 2}
         fixtures = (
             {"customers": [customer()]},
-            {"stock": {"ca_loc": 2}, "customers": [customer(reserved={"ca_loc": 2})]},
+            {"stock": stock, "customers": [customer(reserved=reserved)]},
             {"customers": [customer(order_status="assigned")]},
             {"customers": [customer(state="eating", order_status="served", eat_ticks_left=1)]},
             {"customers": [customer(order_status="assigned", patience_ticks_left=-1)]},

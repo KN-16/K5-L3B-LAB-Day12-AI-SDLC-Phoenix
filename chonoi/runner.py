@@ -12,6 +12,7 @@ import os
 import tempfile
 
 from .day import Day
+from .freshness import view_items
 from .ids import IdAllocator
 from .inputs import BUTTONS_V10, BUTTONS_V11, InputPlayer
 from .inventory import write_inventory
@@ -118,7 +119,12 @@ class Session:
     def write_inventory_if_done(self, inventory_out):
         """File kho: ghi MỘT lần khi có gather_end; chưa kết thúc thì giữ nguyên file đích."""
         if self.mode == "gather" and self.sim.done and inventory_out:
-            write_inventory(inventory_out, self.sim.inventory_items())
+            items = self.sim.inventory_items()
+            if "freshness" in self.tuning:
+                view = view_items(items, self.tuning["freshness"]["spoiled_below"])
+                write_inventory(inventory_out, view, contract_version="1.2")
+            else:
+                write_inventory(inventory_out, items)
 
 
 def _write_run(sess, frames, ticks, path, snapshot_every):

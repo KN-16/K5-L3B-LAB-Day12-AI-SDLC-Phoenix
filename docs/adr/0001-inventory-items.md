@@ -1,12 +1,12 @@
 # ADR 0001 về kho cá thể
 
-**Trạng thái đề xuất.** Khôi review và xác nhận trước khi đưa vào PR bàn giao. Bản gốc là `phase-2` tại `5455042`. Quyết định phục vụ Ticket-03 và thực hiện hành động về fixture đổi schema trong retro Phase 2.
+**Trạng thái triển khai.** Bản tích hợp đã áp dụng schema và chạy kiểm chứng. Khôi review trước khi merge. Bản gốc là `phase-2` tại `5455042`. Quyết định phục vụ Ticket-03 và thực hiện hành động về fixture đổi schema trong retro Phase 2.
 
 ## Bối cảnh và quyết định
 
 Kho đếm theo loại của v1.1 ghi đủ số lượng nhưng không theo dõi được cá thể, độ tươi và nguyên liệu đang giữ cho từng đơn. v1.2 dùng một bản ghi cho mỗi cá thể. Đổi cả hai đầu và bật manifest trong cùng thời điểm sẽ yêu cầu cả nhóm tích hợp trên một nhánh. Nhóm chọn giữ đường chạy v1.1 qua hai PR đầu để mỗi lát có thể review và test riêng.
 
-Diên đưa adapter dùng chung và Gather lên `main` trước. Nhân nối Quán với adapter ở PR thứ hai. Khôi bật v1.2 trong PR cuối sau khi kiểm hai đầu. CLI v1.2 chọn schema theo version và trả mã 2 cho file kho đếm. Tag P1/P2 tiếp tục lưu các bản chạy schema cũ.
+PR #7 của Diên đưa adapter lên `main` trước. PR #8 của Nhân nối Quán. Trong PR cuối, Khôi nối adapter vào Gather và các điểm bàn giao, bật v1.2 rồi kiểm hai đầu. CLI v1.2 chọn schema theo version và trả mã 2 cho file kho đếm. Tag P1/P2 tiếp tục lưu các bản chạy schema cũ.
 
 Độ tươi nội bộ dùng phân số chính xác để phép trừ mỗi tick, so ngưỡng 30 và floor giá diễn ra trước khi chuyển sang số JSON. Dùng cùng helper cho file và snapshot, chia sẻ bản sao kho cá thể nội bộ qua `day`. Chi tiết giao diện và thứ tự tick nằm trong [hợp đồng v1.2](../contracts/phase-3.md).
 

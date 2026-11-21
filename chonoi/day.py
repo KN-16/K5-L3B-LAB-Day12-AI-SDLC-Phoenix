@@ -4,7 +4,8 @@ from collections import Counter
 from copy import deepcopy
 
 from .errors import BadInput
-from .ids import IdAllocator
+from .freshness import ITEM_ID_PREFIX, view_items
+from .ids import IdAllocator, sort_by_id
 from .rng import Streams
 
 
@@ -56,17 +57,20 @@ def gather_tuning(tuning, upgrades):
 class Shop:
     mode = phase = "shop"
 
-    def __init__(self, tuning, quan, upgrades):
+    def __init__(self, tuning, quan, upgrades, freshness=None):
         self.tuning = tuning
         self.upgrades = upgrades
-        self.stock = dict(quan.stock)
+        self.freshness = freshness
+        self.stock = [item.copy() for item in quan.stock] if freshness else dict(quan.stock)
         self.money, self.earned, self.reputation = quan.money, quan.earned, quan.reputation
         self.time_left_ticks = tuning["max_ticks"]
         self.done = False
         self.reason = None
 
     def snapshot(self):
-        return {"stock": dict(self.stock)}
+        stock = (view_items(sort_by_id(self.stock), self.freshness["spoiled_below"])
+                 if self.freshness else dict(self.stock))
+        return {"stock": stock}
 
     def _buy(self, action):
         offers = self.tuning["upgrades"].get(action)
@@ -114,8 +118,14 @@ class Day:
     def _open_gather(self):
         self.active_upgrades = dict(self.upgrades)
         tuning = gather_tuning(self.tuning, self.active_upgrades)
-        self.sim = self.gather(tuning, deepcopy(self.scenario.get("gather", {})),
-                               self.streams, self.ids, day=self.number)
+        scenario = deepcopy(self.scenario.get("gather", {}))
+        self.template_item_ids = {}
+        if self.number > 1 and "freshness" in tuning:
+            for item in scenario.get("hold", []):
+                old_id = item["id"]
+                item["id"] = self.ids.new(ITEM_ID_PREFIX)
+                self.template_item_ids[old_id] = item["id"]
+        self.sim = self.gather(tuning, scenario, self.streams, self.ids, day=self.number)
 
     def opening_events(self):
         return [("day_start", {}), ("day_plan", self.plans[self.number]), ("phase_start", {})]
@@ -131,11 +141,18 @@ class Day:
         phase = self.sim.phase
         if phase == "gather":
             progress = {"money": self.money, "earned": self.earned, "reputation": self.reputation}
-            self.sim = self.quan(self.tuning, deepcopy(self.scenario.get("quan", {})),
+            scenario = deepcopy(self.scenario.get("quan", {}))
+            if self.template_item_ids:
+                for customer in scenario.get("customers", []):
+                    reserved = customer.get("reserved")
+                    if isinstance(reserved, list):
+                        customer["reserved"] = [self.template_item_ids.get(item_id, item_id)
+                                                if isinstance(item_id, str) else item_id for item_id in reserved]
+            self.sim = self.quan(self.tuning, scenario,
                                  self.streams, self.ids, inventory=self.sim.inventory_items(),
                                  day_plan=self.plans[self.number], progress=progress)
         elif phase == "quan":
-            self.sim = Shop(self.tuning["shop"], self.sim, self.upgrades)
+            self.sim = Shop(self.tuning["shop"], self.sim, self.upgrades, self.tuning.get("freshness"))
         else:
             self.days_completed += 1
             if self.days_completed == self.days:
