@@ -26,6 +26,7 @@
 - Mỗi agent một việc rõ ràng (một lát). Cho agent đọc PRD/ticket đúng phase và hợp đồng kho trước.
 - Diên giữ `sim/gather.py`, Nhân giữ `sim/quan.py`, Khôi giữ HUD, manifest, runner và kiểm tích hợp. Thay đổi dùng chung báo Khôi trước.
 - Phase 2 dùng giao diện trong `docs/contracts/phase-2.md`. Runner nối hai ca, giữ bộ đếm pause và bàn giao kho đếm qua file hoặc trong vòng `day`.
+- Phase 3 chia phần theo `docs/plan/phase-3.md` và `docs/contracts/phase-3.md`. Diên giữ adapter kho và Gather, Nhân giữ Quán, Khôi giữ kết nối chung và HUD. Gộp Diên rồi Nhân với manifest v1.1. Khôi bật v1.2 trong PR cuối sau khi kiểm cả hai đầu.
 - Đặt kit, fixture thử tay và output tạm dưới `tmp/`. Stage từng đường dẫn đã rà diff. Phần phụ thuộc chưa vào `main` thì ghi việc đang chờ và dừng tại đó.
 - Agent làm xong phải chạy test và ghi kết quả vào mô tả commit hoặc `docs/proof/`; người đọc lại thay đổi trước khi đẩy.
 - Sáng tạo thêm được khuyến khích nhưng phải tắt ở headless (xem README, mục "Tự do sáng tạo").
