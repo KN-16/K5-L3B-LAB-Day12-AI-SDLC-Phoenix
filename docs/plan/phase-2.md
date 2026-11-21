@@ -15,5 +15,5 @@ Mục tiêu là hoàn thành Ticket-02 từ `phase-1` tại `ad79355`. Chạy m�
 
 1. Diên và Nhân có thể tách nhánh từ tag `phase-1` và bắt đầu ngay khi nhận tài liệu cùng dữ liệu chuẩn. Mỗi người sở hữu file sim và test riêng, có thể nạp delta tuning trong fixture để test lát mình. Khôi review giao diện và phụ trách manifest, adapter, runner và HUD. Khi cần sửa file dùng chung, báo Khôi để thống nhất trước khi tích hợp.
 2. Diên tách cá bơi/sinh và cá sấu thành các commit có nội dung. Nhân tách nhiều bếp/bàn với menu mở rộng và lọc kế hoạch thành hai commit có nội dung, kèm test. Khôi dựng luồng ngày bằng fixture cố định song song. Hai lát có thể push và mở PR sớm, chỉ chờ ở bước cần adapter hoặc phải bật v1.1 cùng nhau.
-3. Rà tiến độ và chạy smoke kho ở mốc 20 phút của đợt build. Khi thay đổi cần đi cùng nhau, gom lên nhánh tích hợp bằng merge commit, chạy test rồi mới đưa v1.1 lên `main`. Chờ SHA bàn giao trước khi tiếp tục bước phụ thuộc.
+3. Rà tiến độ và chạy smoke kho ở mốc 20 phút của đợt build. Gather và Quán vào `main` trước, giữ v1.0. Khôi nối phần vòng ngày trên nền hai PR đã gộp, bật v1.1 và kiểm toàn luồng trong PR cuối.
 4. Kiểm nhiều Ngày, nâng cấp và P1 còn hiệu lực. Khôi review bằng chứng, cập nhật AI log và retro có một hành động cho Phase 3, rồi gắn `phase-2` đúng commit bàn giao.

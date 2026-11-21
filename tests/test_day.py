@@ -12,7 +12,7 @@ from chonoi.inputs import BUTTONS_V11, InputPlayer
 from chonoi.live import LiveGame
 from chonoi.runner import Session, run
 from chonoi.scenario import load_scenario
-from helpers import ROOT, Workdir, read_jsonl, write_json
+from helpers import ROOT, Workdir, read_jsonl, run_headless, write_json
 
 
 def phase2_contract():
@@ -182,3 +182,67 @@ class TestDay(unittest.TestCase):
         game._tick_once()
         status = json.loads(game.state_json())
         self.assertEqual((status["screen"], status["money"], status["upgrades"]), ("summary", 0, {"oxygen": 1}))
+
+
+class TestIntegratedDay(unittest.TestCase):
+    def test_day_carries_stock_and_applies_both_upgrades_and_second_monster(self):
+        with Workdir() as work:
+            scenario = write_json(work.path("day.json"), {
+                "day": {"money": 450, "earned": 450},
+                "gather": {"hold": ["ca_loc", "ca_keo", "keo_neo"], "time_left_ticks": 1},
+                "quan": {"time_left_ticks": 2, "random_customers": False},
+            })
+            inputs = write_json(work.path("inputs.json"), {"frames": [
+                {"tick": 3, "pause": True, "buy": "hp"},
+                {"tick": 4, "pause": False},
+                {"tick": 5, "pause": True, "buy": "oxygen", "shop_done": True},
+                {"tick": 6, "pause": False, "shop_done": False},
+                {"tick": 9, "buy": "hp", "shop_done": True},
+                {"tick": 10, "shop_done": False},
+                {"tick": 13, "shop_done": True},
+            ]})
+            output = work.path("day.jsonl")
+            code, err = run_headless("--mode", "day", "--days", "3", "--seed", "42",
+                                     "--ticks", "30", "--scenario", scenario, "--inputs", inputs,
+                                     "--out", output, "--snapshot-every", "1")
+            self.assertEqual(code, 0, err)
+            rows = read_jsonl(output)
+        snapshots = {row["tick"]: row for row in rows if row["type"] == "snapshot"}
+        self.assertEqual(snapshots[1]["stock"], {"ca_loc": 1, "ca_keo": 1, "keo_neo": 1})
+        self.assertEqual((snapshots[4]["state"], snapshots[4]["sim_tick"]), ("paused", 3))
+        self.assertEqual((snapshots[6]["day"], snapshots[6]["player"]["oxygen_max_ticks"]), (2, 2700))
+        self.assertEqual(snapshots[10]["player"]["hp"], 4)
+        self.assertEqual([m["id"] for m in snapshots[10]["monsters"]], ["M1", "M2"])
+        self.assertEqual(snapshots[10]["active_upgrades"], {"oxygen": 1, "hp": 1})
+        self.assertEqual([(row["tick"], row["data"]["upgrade"]) for row in rows if row.get("name") == "bought"],
+                         [(6, "oxygen"), (10, "hp")])
+        self.assertEqual((rows[-1]["days_completed"], rows[-1]["reason"], rows[-1]["money"], rows[-1]["earned"]),
+                         (3, "days_complete", 0, 450))
+
+    def test_disabled_extension_buttons_are_ignored(self):
+        with Workdir() as work:
+            plain, optional = work.path("plain.jsonl"), work.path("optional.jsonl")
+            inputs = write_json(work.path("optional.json"), {
+                "frames": [{"tick": 0, "attack": True, "photo": True}],
+            })
+            common = ("--mode", "gather", "--seed", "42", "--ticks", "10")
+            code, err = run_headless(*common, "--out", plain)
+            self.assertEqual(code, 0, err)
+            code, err = run_headless(*common, "--out", optional, "--inputs", inputs)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(Path(plain).read_bytes(), Path(optional).read_bytes())
+
+    def test_cli_rejects_recoil_fixture_without_unit_direction(self):
+        with Workdir() as work:
+            scenario = write_json(work.path("recoil.json"), {
+                "gather": {"monsters": [{
+                    "id": "M1", "kind": "ca_sau", "pos": [60, 24],
+                    "waypoints": [[60, 24], [64, 24]],
+                    "state": "recoil", "state_ticks_left": 4, "recoil_dir": [0, 0],
+                }]},
+            })
+            output = Path(work.path("out.jsonl"))
+            code, _ = run_headless("--mode", "gather", "--seed", "42", "--ticks", "1",
+                                  "--scenario", scenario, "--out", str(output))
+            self.assertEqual(code, 2)
+            self.assertFalse(output.exists())

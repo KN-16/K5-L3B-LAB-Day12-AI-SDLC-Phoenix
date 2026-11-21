@@ -6,6 +6,7 @@ phải có đúng một món, khách eating thiếu giá/tip...) — xem PRD-0 m
 """
 
 import json
+import math
 
 from .errors import BadInput
 from .day import day_plans, gather_tuning
@@ -203,6 +204,8 @@ def _validate_monster(monster, gather):
     direction = monster.get("recoil_dir")
     if state == "recoil":
         _pos("monsters.recoil_dir", direction, {"x": [-1, 1], "d": [-1, 1]})
+        if not math.isclose(math.hypot(*direction), 1.0, rel_tol=0, abs_tol=0.001):
+            raise BadInput("monsters.recoil_dir phải là vector đơn vị")
     elif direction is not None:
         raise BadInput("monsters.recoil_dir chỉ có giá trị khi recoil")
 

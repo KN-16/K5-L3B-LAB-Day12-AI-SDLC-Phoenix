@@ -1,6 +1,6 @@
 # Hợp đồng tích hợp Phase 2
 
-Mốc gốc là tag `phase-1` tại `ad79355`. [Dữ liệu Phase 2](phase-2.tuning.json) ghi các giá trị thêm hoặc thay đổi. Khi tích hợp, gộp object theo khóa và thay toàn bộ danh sách hoặc giá trị đơn. Ba món P1 và các hằng số giữ nguyên theo Ticket-02 vẫn lấy từ manifest hiện tại. Bật `1.1` trên nhánh tích hợp sau khi validator, hai lát và runner cùng sẵn sàng.
+Mốc gốc là tag `phase-1` tại `ad79355`. [Dữ liệu Phase 2](phase-2.tuning.json) ghi các giá trị thêm hoặc thay đổi. Manifest v1.1 kết hợp dữ liệu này với ba món P1 và các hằng số giữ nguyên theo Ticket-02. PR cuối của Khôi bật v1.1 sau khi cả Gather và Quán đã vào nền `main`.
 
 ## Giao diện giữa các lát
 
